@@ -335,6 +335,26 @@ FFmpeg is shared by Spotify and YouTube: changing its mode/path affects both.
 For an external binary, specify its executable name or absolute path. External/bundled
 dependency updates remain your responsibility; the UI never modifies them.
 
+Upstream standalone binaries may require a newer glibc than your OS provides.
+For example, spotdl 4.5.2's Linux binary requires `GLIBC_2.38` and does not run
+on EL9; it runs on EL10. Failed executable checks show the subprocess diagnostic
+and preserve the previous installation. Choose an older compatible upstream version
+or configure an external spotdl installation built for your OS. Do not replace
+the system glibc to accommodate a downloaded plugin binary.
+
+On EL9, select **managed-python** on the spotdl dependency page, save, and click
+**Install / update**. This installs the selected spotdl version from PyPI into a
+private versioned virtual environment beneath `DEPENDENCY_DIR/spotdl` (RPM:
+`/var/lib/plex-source-injection/bin/spotdl`). It uses the service's Python interpreter,
+not the incompatible upstream standalone executable. The RPM includes pip/venv
+support. The spotdl wheel is verified against its PyPI SHA-256; dependencies are
+resolved as binary wheels over HTTPS from PyPI and are not a fully locked bundle.
+No system Python packages are modified. Standalone and Python installations have
+separate manifests; switching sources selects that source's installed version.
+Updates are explicit, previous environments are retained for active downloads,
+and failed installations do not replace the selected version. Source checkouts
+need Python with pip/venv support. FFmpeg must still be configured separately.
+
 #### Tokens and credentials
 
 The General page offers **Sign in with Plex**. Save outstanding changes, start sign-in,

@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from dependencies import DependencyError, ffmpeg_location, resolve_tool
+from dependencies import DependencyError, ffmpeg_location, resolve_tool, tool_environment
 from .base import (
     BaseProvider,
     ExternalTrack,
@@ -55,7 +55,7 @@ class SpotifyProvider(BaseProvider):
         self.managed_binary: str | None = None
         self.dependency_error: str | None = None
         try:
-            if settings.get("SPOTDL_MODE", "external") == "managed":
+            if settings.get("SPOTDL_MODE", "external") in ("managed", "managed-python"):
                 self.managed_binary = resolve_tool(settings, "spotdl")
             self.ffmpeg_path = ffmpeg_location(settings)
         except DependencyError as exc:
@@ -147,7 +147,7 @@ class SpotifyProvider(BaseProvider):
         if self.ffmpeg_path:
             args += ["--ffmpeg", self.ffmpeg_path]
         process = await asyncio.create_subprocess_exec(
-            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+            *args, env=tool_environment(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
         )
         try:
             output, _ = await asyncio.wait_for(

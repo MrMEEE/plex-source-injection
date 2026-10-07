@@ -327,7 +327,7 @@ def install_admin(app: FastAPI, store: ConfigStore, listening_port: int, admin_p
     async def check_dependency(name: str) -> Response:
         known_tool(name)
         try:
-            releases = await manager.releases(name)
+            releases = await manager.releases(name, store.settings())
         except (httpx.HTTPError, ValueError, KeyError, DependencyError) as exc:
             logger.warning("Failed to check %s releases: %s", name, type(exc).__name__)
             raise HTTPException(502, f"Could not retrieve {name} releases from upstream") from exc
@@ -340,7 +340,7 @@ def install_admin(app: FastAPI, store: ConfigStore, listening_port: int, admin_p
             try:
                 info = await manager.install(store.settings(), name, update.version)
             except (DependencyError, httpx.HTTPError, OSError, ValueError, KeyError, asyncio.TimeoutError) as exc:
-                logger.warning("Dependency installation failed for %s: %s", name, type(exc).__name__)
+                logger.warning("Dependency installation failed for %s: %s", name, str(exc) if isinstance(exc, DependencyError) else type(exc).__name__)
                 raise HTTPException(502, str(exc) if isinstance(exc, DependencyError) else f"Could not install {name}; previous installation remains selected") from exc
             await app.state.apply_settings(store.settings(), ProviderRegistry.from_settings(store.settings()))
             return JSONResponse({"installed": info}, headers={"Cache-Control": "no-store"})

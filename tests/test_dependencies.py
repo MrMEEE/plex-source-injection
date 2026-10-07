@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from config import Settings
-from dependencies import DependencyError, DependencyManager, ffmpeg_location, installed, resolve_tool
+from dependencies import DependencyError, DependencyManager, ffmpeg_location, installed, resolve_tool, tool_environment
 
 
 def release(name, payload, version="v1.2.3", digest=None):
@@ -157,3 +157,90 @@ def test_external_ffmpeg_retains_exact_executable_name(monkeypatch):
     settings = Settings.from_env({"FFMPEG_BINARY": "/custom/ffmpeg-custom"})
     assert ffmpeg_location(settings) == "/custom/ffmpeg-custom"
     assert ffmpeg_location(Settings()) is None
+
+
+def test_probe_reports_glibc_failure_and_keeps_output_bounded(tmp_path):
+    binary = tmp_path / "spotdl"
+    binary.write_text(
+        "#!/bin/sh\n"
+        "echo \"Failed to load Python shared library: version GLIBC_2.38 not found\" >&2\n"
+        "exit 255\n"
+    )
+    binary.chmod(0o700)
+    with pytest.raises(DependencyError, match="GLIBC_2.38") as error:
+        asyncio.run(DependencyManager.probe(binary, "spotdl"))
+    assert "exit 255" in str(error.value)
+    assert "externally installed executable" in str(error.value)
+    assert "do not replace the system glibc" in str(error.value)
+    binary.write_text("#!/bin/sh\nhead -c 4000 /dev/zero | tr '\\000' x\nexit 1\n")
+    with pytest.raises(DependencyError) as error:
+        asyncio.run(DependencyManager.probe(binary, "spotdl"))
+    assert len(str(error.value)) < 2200
+
+
+def test_python_spotdl_install_selection_and_failed_update(tmp_path, monkeypatch):
+    version = "4.5.2"
+    data = {
+        "info": {"version": version},
+        "urls": [{"filename": f"spotdl-{version}-py3-none-any.whl", "yanked": False,
+                  "digests": {"sha256": "a" * 64},
+                  "url": f"https://files.pythonhosted.org/packages/test/spotdl-{version}-py3-none-any.whl"}],
+    }
+    requests = []
+    commands = []
+    fail = False
+
+    def upstream(request):
+        requests.append(str(request.url))
+        return httpx.Response(200, json=data)
+
+    async def run(args):
+        commands.append(args)
+        if fail:
+            raise DependencyError("installer failure")
+        if "venv" in args:
+            directory = Path(args[-1]) / "bin"
+            directory.mkdir()
+            (directory / "spotdl").write_text("#!/bin/sh\necho 4.5.2\n")
+            (directory / "spotdl").chmod(0o700)
+
+    monkeypatch.setattr(DependencyManager, "run_python_install", staticmethod(run))
+    manager = DependencyManager(httpx.MockTransport(upstream))
+    settings = Settings.from_env({"DEPENDENCY_DIR": str(tmp_path), "SPOTDL_MODE": "managed-python"})
+    first = asyncio.run(manager.install(settings, "spotdl", "latest"))
+    assert requests == ["https://pypi.org/pypi/spotdl/json"]
+    assert "python-4.5.2-" in first["binary"]
+    assert resolve_tool(settings, "spotdl") == first["binary"]
+    assert first["source"] == "PyPI/spotdl"
+    assert "--only-binary=:all:" in commands[1]
+    assert commands[1][-1].endswith("#sha256=" + "a" * 64)
+    assert not (tmp_path / "spotdl/current.json").exists()
+    fail = True
+    with pytest.raises(DependencyError, match="installer failure"):
+        asyncio.run(manager.install(settings, "spotdl", "v4.5.2"))
+    assert requests[-1] == "https://pypi.org/pypi/spotdl/4.5.2/json"
+    assert installed(settings, "spotdl") == first
+    assert len(list((tmp_path / "spotdl").glob("python-4.5.2-*"))) == 1
+
+
+def test_tool_environment_excludes_host_python_paths(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/private-rpm-pythonlibs")
+    monkeypatch.setenv("PYTHONHOME", "/other-python")
+    monkeypatch.setenv("VIRTUAL_ENV", "/other-venv")
+    monkeypatch.setenv("HOME", "/var/lib/plex-source-injection")
+    environment = tool_environment()
+    assert not {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"} & environment.keys()
+    assert environment["HOME"] == "/var/lib/plex-source-injection"
+
+
+def test_python_spotdl_lists_stable_pypi_wheels():
+    def wheel(yanked=False):
+        return {"filename": "spotdl-py3-none-any.whl", "yanked": yanked,
+                "upload_time_iso_8601": "2026-10-08T00:00:00Z"}
+    data = {"releases": {"4.5.2": [wheel()], "4.10.0": [wheel()],
+                         "5.0.0rc1": [wheel()], "4.6.0": [wheel(True)],
+                         "4.9.0": [{"filename": "spotdl.tar.gz", "yanked": False}]}}
+    manager = DependencyManager(httpx.MockTransport(lambda request: httpx.Response(200, json=data)))
+    settings = Settings.from_env({"SPOTDL_MODE": "managed-python"})
+    releases = asyncio.run(manager.releases("spotdl", settings))
+    assert [release["version"] for release in releases] == ["4.10.0", "4.5.2"]

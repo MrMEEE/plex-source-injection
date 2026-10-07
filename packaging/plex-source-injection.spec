@@ -30,6 +30,7 @@ BuildRequires:  %{python_pip_package}
 BuildRequires:  systemd-rpm-macros
 Requires:       %{name}-pythonlibs%{?_isa} = %{version}-%{release}
 Requires:       %{python_package}
+Requires:       %{python_pip_package}
 Requires:       python(abi) = 3.12
 Requires:       systemd
 Requires:       util-linux

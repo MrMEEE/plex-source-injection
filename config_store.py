@@ -127,7 +127,7 @@ def validate(values: Mapping[str, str]) -> Settings:
     if values["SPOTDL_PASS_CREDENTIALS"].lower() not in ("true", "false", "1", "0", "yes", "no"):
         raise ValueError("SPOTDL_PASS_CREDENTIALS must be true or false")
     for key, modes in (
-        ("SPOTDL_MODE", ("external", "managed")),
+        ("SPOTDL_MODE", ("external", "managed", "managed-python")),
         ("YTDLP_MODE", ("bundled", "external", "managed")),
         ("FFMPEG_MODE", ("external", "managed")),
     ):
@@ -231,7 +231,7 @@ class ConfigStore:
             for tool in TOOLS:
                 if (previous / tool).is_dir():
                     shutil.copytree(previous / tool, staging / tool)
-            for manifest in staging.glob("*/current.json"):
+            for manifest in [*staging.glob("*/current.json"), *staging.glob("*/python-current.json")]:
                 info = json.loads(manifest.read_text())
                 binary = Path(info["binary"])
                 tool = manifest.parent.name

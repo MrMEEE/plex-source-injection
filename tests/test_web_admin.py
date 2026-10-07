@@ -338,7 +338,8 @@ def test_dependency_api_auth_validation_and_explicit_install(admin, monkeypatch)
         installed_calls.append((name, version))
         return {"version": "v4.5.2", "binary": "/private/spotdl", "sha256": "0" * 64}
 
-    async def fake_releases(name):
+    async def fake_releases(name, settings):
+        assert settings.get("SPOTDL_MODE") == store.settings().get("SPOTDL_MODE")
         return [{"version": "v4.5.2", "published": "2026-07-20"}]
 
     monkeypatch.setattr(app.state.dependency_manager, "install", fake_install)

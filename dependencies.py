@@ -9,6 +9,7 @@ import os
 import platform
 import re
 import shutil
+import sys
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -34,11 +35,15 @@ class Tool:
 
 
 TOOLS = {
-    "spotdl": Tool("spotdl", "spotDL/spotify-downloader", "SPOTDL_MODE", "SPOTDL_BINARY", "spotdl"),
+    "spotdl": Tool("spotdl", "spotDL/spotify-downloader", "SPOTDL_MODE", "SPOTDL_BINARY", "spotdl", ("external", "managed", "managed-python")),
     "yt-dlp": Tool("yt-dlp", "yt-dlp/yt-dlp", "YTDLP_MODE", "YTDLP_BINARY", "yt-dlp", ("bundled", "external", "managed")),
     "ffmpeg": Tool("ffmpeg", "yt-dlp/FFmpeg-Builds", "FFMPEG_MODE", "FFMPEG_BINARY", "ffmpeg"),
 }
 TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,100}$")
+
+
+def tool_environment() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
 
 
 def tool_root(settings: Settings, name: str) -> Path:
@@ -46,7 +51,8 @@ def tool_root(settings: Settings, name: str) -> Path:
 
 
 def installed(settings: Settings, name: str) -> dict[str, str] | None:
-    manifest = tool_root(settings, name) / "current.json"
+    filename = "python-current.json" if name == "spotdl" and settings.get("SPOTDL_MODE") == "managed-python" else "current.json"
+    manifest = tool_root(settings, name) / filename
     if not manifest.exists():
         return None
     try:
@@ -62,7 +68,7 @@ def installed(settings: Settings, name: str) -> dict[str, str] | None:
 def resolve_tool(settings: Settings, name: str) -> str:
     tool = TOOLS[name]
     mode = settings.get(tool.mode_key, tool.modes[0])
-    if mode == "managed":
+    if mode in ("managed", "managed-python"):
         info = installed(settings, name)
         if not info:
             raise DependencyError(f"{name} is not installed. Open its plugin page and click Install.")
@@ -119,9 +125,26 @@ class DependencyManager:
                 return f"ffmpeg-master-latest-{suffix}-gpl.tar.xz"
         raise DependencyError(f"Managed {name} is not available for {system}/{machine}; use an external binary.")
 
-    async def releases(self, name: str) -> list[dict[str, str]]:
+    async def releases(self, name: str, settings: Settings | None = None) -> list[dict[str, str]]:
         tool = TOOLS[name]
         async with self.client() as client:
+            if name == "spotdl" and settings is not None and settings.get("SPOTDL_MODE") == "managed-python":
+                response = await client.get("https://pypi.org/pypi/spotdl/json")
+                response.raise_for_status()
+                versions = response.json()["releases"]
+                stable = [
+                    version for version, assets in versions.items()
+                    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version)
+                    and any(asset["filename"].endswith("-py3-none-any.whl") and not asset["yanked"] for asset in assets)
+                ]
+                stable.sort(key=lambda version: tuple(int(part) for part in version.split(".")), reverse=True)
+                return [
+                    {"version": version, "published": next(
+                        asset["upload_time_iso_8601"] for asset in versions[version]
+                        if asset["filename"].endswith("-py3-none-any.whl") and not asset["yanked"]
+                    )}
+                    for version in stable[:10]
+                ]
             response = await client.get(f"https://api.github.com/repos/{tool.repository}/releases", params={"per_page": 10})
             response.raise_for_status()
             releases = response.json()
@@ -133,6 +156,8 @@ class DependencyManager:
     async def install(self, settings: Settings, name: str, version: str) -> dict[str, str]:
         if not TAG.fullmatch(version):
             raise DependencyError("Invalid release version")
+        if name == "spotdl" and settings.get("SPOTDL_MODE") == "managed-python":
+            return await self.install_python_spotdl(settings, version)
         tool = TOOLS[name]
         async with self.lock, self.client() as client:
             endpoint = "latest" if version == "latest" and name != "ffmpeg" else f"tags/{version}"
@@ -199,15 +224,87 @@ class DependencyManager:
                     Path(temporary).unlink(missing_ok=True)
                 return info
 
+    async def install_python_spotdl(self, settings: Settings, version: str) -> dict[str, str]:
+        requested = version.removeprefix("v")
+        if requested != "latest" and not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", requested):
+            raise DependencyError("Python spotdl requires a stable MAJOR.MINOR.PATCH version")
+        async with self.lock, self.client() as client:
+            suffix = "" if requested == "latest" else f"/{requested}"
+            response = await client.get(f"https://pypi.org/pypi/spotdl{suffix}/json")
+            response.raise_for_status()
+            release = response.json()
+            version = release["info"]["version"]
+            if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+                raise DependencyError("PyPI spotdl version is not a stable release")
+            wheel = next((asset for asset in release["urls"] if asset["filename"].endswith("-py3-none-any.whl") and not asset["yanked"]), None)
+            if wheel is None:
+                raise DependencyError("No stable universal spotdl wheel is available on PyPI")
+            digest = wheel["digests"]["sha256"]
+            url = wheel["url"]
+            if not re.fullmatch(r"[a-f0-9]{64}", digest) or not url.startswith("https://files.pythonhosted.org/packages/"):
+                raise DependencyError("Invalid PyPI spotdl wheel URL or SHA-256 digest")
+            root = tool_root(settings, "spotdl")
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            # Virtual environments contain absolute shebangs and cannot be renamed.
+            destination = Path(tempfile.mkdtemp(prefix=f"python-{version}-", dir=root))
+            published = False
+            try:
+                await self.run_python_install([sys.executable, "-I", "-m", "venv", str(destination)])
+                python = destination / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+                await self.run_python_install([
+                    str(python), "-I", "-m", "pip", "--isolated", "install",
+                    "--index-url", "https://pypi.org/simple", "--only-binary=:all:",
+                    "--no-cache-dir", "--disable-pip-version-check",
+                    f"spotdl @ {url}#sha256={digest}",
+                ])
+                binary = destination / ("Scripts/spotdl.exe" if os.name == "nt" else "bin/spotdl")
+                reported = await self.probe(binary, "spotdl")
+                info = {
+                    "version": version, "sha256": digest, "binary": str(binary),
+                    "source": "PyPI/spotdl", "reported_version": reported,
+                }
+                fd, temporary = tempfile.mkstemp(prefix="python-current-", suffix=".json", dir=root)
+                try:
+                    with os.fdopen(fd, "w") as manifest:
+                        json.dump(info, manifest)
+                    os.replace(temporary, root / "python-current.json")
+                finally:
+                    Path(temporary).unlink(missing_ok=True)
+                published = True
+                return info
+            finally:
+                if not published:
+                    shutil.rmtree(destination)
+
+    @staticmethod
+    async def run_python_install(args: list[str]) -> None:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *args, env=tool_environment(),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+        except OSError as exc:
+            raise DependencyError(f"Cannot start Python dependency installer: {exc.strerror}") from exc
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(), timeout=600)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            process.kill()
+            await process.wait()
+            raise
+        if process.returncode:
+            detail = output.decode(errors="replace")[-2000:] if output else "No installer output"
+            raise DependencyError(f"Python spotdl installation failed: {detail}. Ensure Python venv/pip support is installed. Previous installation remains selected.")
+
     @staticmethod
     async def probe(binary: Path, name: str) -> str:
         try:
             process = await asyncio.create_subprocess_exec(
                 str(binary), "-version" if name == "ffmpeg" else "--version",
+                env=tool_environment(),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
             )
         except OSError as exc:
-            raise DependencyError(f"{name} cannot run on this system; use an external executable") from exc
+            raise DependencyError(f"{name} cannot run on this system: {exc.strerror}; use an external executable") from exc
         try:
             output, _ = await asyncio.wait_for(process.communicate(), timeout=30)
         except (asyncio.TimeoutError, asyncio.CancelledError):
@@ -215,7 +312,18 @@ class DependencyManager:
             await process.wait()
             raise
         if process.returncode or not output:
-            raise DependencyError(f"{name} version check failed; previous installation remains selected")
+            detail = output.decode(errors="replace").strip()[-2000:] if output else "No output from executable"
+            guidance = ""
+            if "GLIBC_" in detail and "not found" in detail:
+                guidance = (
+                    " The upstream executable requires a newer glibc than this operating system provides."
+                    " Select an older compatible release or use an externally installed executable"
+                    " built for this OS; do not replace the system glibc."
+                )
+            raise DependencyError(
+                f"{name} version check failed (exit {process.returncode}): {detail}.{guidance}"
+                " Previous installation remains selected."
+            )
         return output.decode(errors="replace").splitlines()[0][:200]
 
     @staticmethod

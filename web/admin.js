@@ -321,10 +321,11 @@ function addCategories(page, provider) {
 function addDependencyPage(tool) {
   const page = addPage(`tool/${tool.name}`, tool.name, "Choose an existing executable or install a checksum-verified upstream release.", "T");
   const settings = panel("Dependency source", "Managed installs are explicit. Switching source requires saving. FFmpeg settings are shared by both built-in plugins.");
-  addField(settings.body, {key: tool.mode_key, label: "Installation source", kind: "select", choices: tool.modes, default: tool.modes[0], description: "External uses your binary. Managed uses a downloaded version. Bundled uses the installed Python package."});
+  addField(settings.body, {key: tool.mode_key, label: "Installation source", kind: "select", choices: tool.modes, default: tool.modes[0], description: "External uses your binary. Managed downloads a standalone binary. Managed-python installs spotdl from PyPI into a private virtual environment (recommended on EL9). Bundled uses the installed Python package."});
   addField(settings.body, {key: tool.binary_key, label: "External executable", default: tool.name, description: "Executable name on PATH or absolute file path. Used only in external mode."});
   page.append(settings.container);
-  const downloads = panel("Managed versions", `Source: ${tool.source}. Executables run with the proxy's permissions. Updates never run automatically.`);
+  const sourceDescription = tool.name === "spotdl" ? `${tool.source} (standalone), PyPI (managed-python)` : tool.source;
+  const downloads = panel("Managed versions", `Source: ${sourceDescription}. Executables run with the proxy's permissions. Updates never run automatically.`);
   const body = element("div", "tool-actions");
   const info = element("p", "help", "Checking installed version...");
   const version = element("select");
@@ -361,12 +362,13 @@ function addDependencyPage(tool) {
   });
   install.addEventListener("click", async () => {
     if (dirty) { message("Save or reload your changes before installing a dependency.", true); return; }
-    if (!window.confirm(`Download and install ${tool.name} (${version.value}) from ${tool.source}? The proxy will run this executable when managed mode is selected.`)) return;
+    const source = current.values[tool.mode_key] === "managed-python" ? "PyPI with a private Python virtual environment" : tool.source;
+    if (!window.confirm(`Download and install ${tool.name} (${version.value}) from ${source}? The proxy will run this executable when managed mode is selected.`)) return;
     setBusy(true);
     result.textContent = "Downloading and verifying. This may take several minutes...";
     try {
       const data = await api(`dependencies/${tool.name}/install`, "POST", {version: version.value});
-      result.textContent = `Installed ${data.installed.version}. ${current.values[tool.mode_key] === "managed" ? "New requests now use this version." : "Select Managed and save to use it."} Previous version files remain available to active downloads.`;
+      result.textContent = `Installed ${data.installed.version}. ${["managed", "managed-python"].includes(current.values[tool.mode_key]) ? "New requests now use this version." : "Select Managed and save to use it."} Previous version files remain available to active downloads.`;
       await refresh();
     } catch (error) { result.textContent = error.message; }
     finally { setBusy(false); }
