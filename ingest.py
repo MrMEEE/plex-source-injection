@@ -80,6 +80,10 @@ class Ingestor:
     def clear_cache(self) -> None:
         self._cache.clear()
 
+    def forget(self, external_id: str) -> None:
+        """Drop a cached mapping (e.g. when Plex no longer knows the ratingKey)."""
+        self._cache.pop(external_id, None)
+
     async def download_and_register(self, external_id: str) -> str:
         """Ensure ``external_id`` exists in Plex and return its real numeric ratingKey.
 
@@ -143,7 +147,7 @@ class Ingestor:
         headers = {"X-Plex-Token": self.settings.plex_token, "Accept": "application/json"}
         client = self._http or httpx.AsyncClient(timeout=30)
         try:
-            response = await client.get(url, params=params, headers=headers)
+            response = await client.get(url, params=params, headers=headers, timeout=30.0)
         except httpx.HTTPError as exc:
             raise IngestError(f"Plex scan request failed: {exc}") from exc
         finally:

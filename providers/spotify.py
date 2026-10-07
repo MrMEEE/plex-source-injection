@@ -38,6 +38,13 @@ class SpotifyProvider(BaseProvider):
         if not self.client_id or not self.client_secret:
             raise ProviderConfigurationError("SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET not set")
         self.spotdl_binary = settings.get("SPOTDL_BINARY", "spotdl")
+        # Passing credentials on the command line exposes them in the process list, so it is
+        # opt-in; by default spotdl uses the credentials from its own config.json.
+        self.pass_credentials = (settings.get("SPOTDL_PASS_CREDENTIALS", "false") or "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         self._client: Any = None
 
     def _spotify(self) -> Any:
@@ -109,11 +116,9 @@ class SpotifyProvider(BaseProvider):
             str(output_dir / OUTPUT_TEMPLATE),
             "--format",
             self.settings.audio_format,
-            "--client-id",
-            self.client_id,
-            "--client-secret",
-            self.client_secret,
         ]
+        if self.pass_credentials:
+            args += ["--client-id", self.client_id, "--client-secret", self.client_secret]
         process = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
         )

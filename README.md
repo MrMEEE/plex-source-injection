@@ -72,6 +72,7 @@ Point your Plex clients at `http://<proxy-host>:<PROXY_PORT>` instead of the Ple
 | `SCAN_TIMEOUT` / `SCAN_POLL_INTERVAL` | `120` / `2` | Polling for the newly scanned track |
 | `CLEANUP_INTERVAL_HOURS` | `24` | Cleanup interval |
 | `SPOTDL_BINARY` | `spotdl` | spotdl executable name/path |
+| `SPOTDL_PASS_CREDENTIALS` | `false` | Pass the Spotify credentials to spotdl as CLI arguments (visible in the process list). By default spotdl uses its own `config.json`. |
 
 ## Adding a provider
 
@@ -116,4 +117,4 @@ python -m pytest
 
 * Only JSON search responses are augmented (Plexamp requests JSON); XML is passed through.
 * WebSocket endpoints (e.g. `/:/websockets/notifications`) are not proxied.
-* spotdl receives the Spotify credentials as command-line arguments.
+* Search results are only fetched from providers for clients whose token Plex accepts.

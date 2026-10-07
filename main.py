@@ -142,7 +142,7 @@ def create_app(
         token = request.headers.get("x-plex-token") or request.query_params.get("X-Plex-Token") or ""
         cache: dict[str, float] = request.app.state.auth_cache
         cache_key = hashlib.sha256(token.encode()).hexdigest()
-        if cache.get(cache_key, 0) > time.monotonic():
+        if token and cache.get(cache_key, 0) > time.monotonic():
             return True
         headers = {k.lower(): v for k, v in _request_headers(request)}
         headers["accept"] = "application/json"
@@ -156,7 +156,8 @@ def create_app(
         except httpx.HTTPError:
             return False
         if response.status_code == 200:
-            cache[cache_key] = time.monotonic() + AUTH_CACHE_TTL
+            if token:
+                cache[cache_key] = time.monotonic() + AUTH_CACHE_TTL
             return True
         return False
 
@@ -172,11 +173,11 @@ def create_app(
             return False
         return True
 
-    async def rewrite_query(request: Request) -> str | None:
+    async def rewrite_query(request: Request) -> tuple[str | None, dict[str, str]]:
         """Replace synthetic ratingKeys embedded in query parameters (e.g. play queue URIs)."""
         raw = request.url.query
         if "ext_" not in raw:
-            return None
+            return None, {}
         params = parse_qsl(raw, keep_blank_values=True)
         found = {
             m.group(2)
@@ -185,7 +186,7 @@ def create_app(
             if owned(m.group(2))
         } | {value for _, value in params if owned(value)}
         if not found:
-            return None
+            return None, {}
         mapping = {ext: await resolve(request, ext) for ext in sorted(found)}
         rewritten = []
         for key, value in params:
@@ -196,7 +197,7 @@ def create_app(
                     lambda m: m.group(1) + mapping.get(m.group(2), m.group(2)), value
                 )
             rewritten.append((key, value))
-        return urlencode(rewritten)
+        return urlencode(rewritten), mapping
 
     async def ingest_and_proxy(
         request: Request,
@@ -207,7 +208,7 @@ def create_app(
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         try:
             mapping = {ext: await resolve(request, ext) for ext in external_ids}
-            query = await rewrite_query(request)
+            query, query_mapping = await rewrite_query(request)
         except (ItemNotFoundError, KeyError, ValueError) as exc:
             logger.info("External item not found: %s", exc)
             return JSONResponse({"error": "External item not found"}, status_code=404)
@@ -218,7 +219,11 @@ def create_app(
             logger.exception("Unexpected ingest failure")
             return JSONResponse({"error": "Failed to fetch external item"}, status_code=502)
         path = build_path(mapping) if build_path is not None else None
-        return await proxy(request, path=path, query=query)
+        response = await proxy(request, path=path, query=query)
+        if response.status_code == 404:
+            for ext in {**mapping, **query_mapping}:
+                request.app.state.ingestor.forget(ext)
+        return response
 
     async def search_handler(request: Request, default_shape: str) -> Response:
         client: httpx.AsyncClient = request.app.state.http
@@ -228,10 +233,14 @@ def create_app(
             _upstream_url(_raw_path(request), request.url.query),
             headers=_request_headers(request),
         )
+        if query.strip() and len(registry) and await client_authorized(request):
+            external_search = search_external(
+                registry, query, settings.search_limit, settings.provider_timeout
+            )
+        else:
+            external_search = asyncio.sleep(0, result=[])
         upstream, external = await asyncio.gather(
-            client.send(upstream_request),
-            search_external(registry, query, settings.search_limit, settings.provider_timeout),
-            return_exceptions=True,
+            client.send(upstream_request), external_search, return_exceptions=True
         )
         if isinstance(upstream, BaseException):
             logger.warning("Upstream search failed: %s", upstream)

@@ -56,6 +56,7 @@ class FakeIngestor:
         self.mapping = mapping or {}
         self.error = error
         self.calls = []
+        self.forgotten = []
 
     async def download_and_register(self, external_id):
         self.calls.append(external_id)
@@ -65,6 +66,9 @@ class FakeIngestor:
 
     def clear_cache(self):
         pass
+
+    def forget(self, external_id):
+        self.forgotten.append(external_id)
 
     async def trigger_scan(self):
         pass
@@ -122,8 +126,8 @@ def test_hubs_search_injects_external_results(settings, upstream):
     assert yt.searches[0][0] == "never" and sp.searches[0][0] == "never"
     assert int(response.headers["content-length"]) == len(response.content)
 
-    forwarded = upstream.requests[0]
-    assert forwarded.url.path == "/hubs/search"
+    assert upstream.paths() == ["/library/sections/3", "/hubs/search"]
+    forwarded = upstream.requests[1]
     assert forwarded.url.params["query"] == "never" and forwarded.url.params["limit"] == "5"
     assert forwarded.headers["X-Plex-Client-Identifier"] == "amp"
     assert forwarded.url.host == "plex.test"
@@ -158,6 +162,7 @@ def test_search_does_not_inject_for_unauthorized_client(settings, upstream):
         response = client.get("/hubs/search", params={"query": "q"}, headers={"Accept": "application/json"})
     assert response.status_code == 401
     assert "ext_fk" not in response.text
+    assert provider.searches == []
 
 
 def test_search_passes_through_non_json(settings, upstream):
@@ -254,3 +259,17 @@ def test_play_queue_uri_is_rewritten(settings, upstream):
     params = parse_qs(forwarded.url.query.decode())
     assert params["uri"] == ["server://machine/com.plexapp.plugins.library/library/metadata/555"]
     assert params["type"] == ["audio"]
+
+
+def test_stale_mapping_is_forgotten_when_plex_returns_404(settings):
+    def handler(request):
+        if request.url.path.startswith("/library/sections/"):
+            return httpx.Response(200, json={})
+        return httpx.Response(404)
+
+    ingestor = FakeIngestor({"ext_fk_abc": "555"})
+    app = create_app(settings, registry=ProviderRegistry([FakeProvider(settings)]), ingestor=ingestor,
+                     upstream_transport=streaming(handler), enable_cleanup=False)
+    with TestClient(app) as client:
+        assert client.get("/library/metadata/ext_fk_abc", headers=JSON_HEADERS).status_code == 404
+    assert ingestor.forgotten == ["ext_fk_abc"]

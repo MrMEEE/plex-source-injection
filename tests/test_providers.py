@@ -141,3 +141,33 @@ def test_spotify_to_track():
          "album": {"name": "Album", "images": [{"url": "img"}]}}
     )
     assert (track.artist, track.title, track.album, track.thumb) == ("A, B", "Song", "Album", "img")
+
+
+@pytest.mark.parametrize("opt_in,expected", [("", False), ("true", True)])
+def test_spotdl_credentials_only_passed_when_opted_in(tmp_path, monkeypatch, opt_in, expected):
+    import asyncio
+
+    import providers.spotify as spotify
+
+    captured = {}
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            (tmp_path / "A - B [4uLU6hMCjMI75M1A2tKUQC].mp3").write_bytes(b"x")
+            return b"", None
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = args
+        return Process()
+
+    monkeypatch.setattr(spotify.shutil, "which", lambda name: "/usr/bin/spotdl")
+    monkeypatch.setattr(spotify.asyncio, "create_subprocess_exec", fake_exec)
+    settings = Settings.from_env(
+        {"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret", "SPOTDL_PASS_CREDENTIALS": opt_in}
+    )
+    path = asyncio.run(SpotifyProvider(settings).download("4uLU6hMCjMI75M1A2tKUQC", tmp_path))
+    assert path.name == "A - B [4uLU6hMCjMI75M1A2tKUQC].mp3"
+    assert ("secret" in captured["args"]) is expected
+    assert "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC" in captured["args"]
