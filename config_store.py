@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
+import logging
 import math
 import os
 import re
 import secrets
+import shutil
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Mapping
@@ -57,6 +61,8 @@ for _local_key, _plex_key, _default in CATEGORY_PATH_KEYS.values():
 SECRET_KEYS = {"PLEX_TOKEN", "SPOTIFY_CLIENT_SECRET", "YOUTUBE_API_KEY"}
 KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,79}$")
 RESERVED_KEYS = {"CONFIG_DB", "ADMIN_PASSWORD"}
+RPM_STATE_DIR = Path("/var/lib/plex-source-injection")
+logger = logging.getLogger(__name__)
 
 
 def is_secret(key: str) -> bool:
@@ -169,13 +175,24 @@ class ConfigStore:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM metadata WHERE key = 'initialized'").fetchone():
+                if self.path.resolve().parent == RPM_STATE_DIR:
+                    row = db.execute("SELECT value FROM configuration WHERE key='DEPENDENCY_DIR'").fetchone()
+                    previous = Path(row[0]) if row else RPM_STATE_DIR / "dependencies"
+                    destination = RPM_STATE_DIR / "bin"
+                    if previous != destination:
+                        self._migrate_dependencies(previous, destination)
+                        db.execute(
+                            "INSERT INTO configuration VALUES ('DEPENDENCY_DIR', ?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                            (str(destination),),
+                        )
                 return False
             file_values = {} if env is not None else {
                 k: v for k, v in dotenv_values(".env").items() if v is not None
             }
             source = dict(env) if env is not None else {**file_values, **os.environ}
             values = dict(DEFAULTS)
-            values["DEPENDENCY_DIR"] = str((self.path.resolve().parent / "dependencies"))
+            values["DEPENDENCY_DIR"] = str(self.path.resolve().parent / "dependencies")
             for key in DEFAULTS:
                 if source.get(key, "").strip():
                     values[key] = source[key].strip()
@@ -183,16 +200,54 @@ class ConfigStore:
             for key in file_values:
                 if key not in DEFAULTS and key not in RESERVED_KEYS:
                     values[key] = source[key]
+            if self.path.resolve().parent == RPM_STATE_DIR:
+                values["DEPENDENCY_DIR"] = str(RPM_STATE_DIR / "bin")
             validate(values)
             db.executemany("INSERT INTO configuration VALUES (?, ?)", values.items())
             db.execute("INSERT INTO metadata VALUES ('initialized', '1')")
             return True
 
+    @staticmethod
+    def _migrate_dependencies(previous: Path, destination: Path) -> None:
+        previous = previous.resolve()
+        destination = destination.resolve()
+        if previous == destination:
+            return
+        if destination.is_relative_to(previous) or previous.is_relative_to(destination):
+            raise ValueError("Cannot migrate overlapping dependency directories")
+        marker = destination / ".migrated-from"
+        if marker.is_file() and marker.read_text() == str(previous):
+            return
+        if destination.exists() and any(destination.iterdir()):
+            raise ValueError(f"Cannot migrate dependencies: {destination} is not empty")
+        if not previous.exists():
+            destination.mkdir(parents=True, exist_ok=True, mode=0o750)
+            logger.info("Managed dependency directory changed from %s to %s", previous, destination)
+            return
+        with tempfile.TemporaryDirectory(prefix=".bin-migration-", dir=destination.parent) as temporary:
+            staging = Path(temporary) / "bin"
+            staging.mkdir(mode=0o750)
+            from dependencies import TOOLS
+            for tool in TOOLS:
+                if (previous / tool).is_dir():
+                    shutil.copytree(previous / tool, staging / tool)
+            for manifest in staging.glob("*/current.json"):
+                info = json.loads(manifest.read_text())
+                binary = Path(info["binary"])
+                tool = manifest.parent.name
+                if not binary.is_relative_to(previous / tool) or not binary.is_file():
+                    raise ValueError(f"Cannot migrate invalid dependency manifest: {manifest.name} ({tool})")
+                info["binary"] = str(destination / binary.relative_to(previous))
+                manifest.write_text(json.dumps(info))
+            (staging / ".migrated-from").write_text(str(previous))
+            os.replace(staging, destination)
+        logger.info("Migrated managed dependencies from %s to %s; original files retained", previous, destination)
+
     def values(self) -> dict[str, str]:
         with self.connect() as db:
             return {
                 **DEFAULTS,
-                "DEPENDENCY_DIR": str(self.path.resolve().parent / "dependencies"),
+                "DEPENDENCY_DIR": str(self.path.resolve().parent / ("bin" if self.path.resolve().parent == RPM_STATE_DIR else "dependencies")),
                 **dict(db.execute("SELECT key, value FROM configuration")),
             }
 
@@ -201,6 +256,8 @@ class ConfigStore:
 
     def save(self, values: Mapping[str, str]) -> None:
         validate(values)
+        if self.path.resolve().parent == RPM_STATE_DIR and Path(values["DEPENDENCY_DIR"]) != RPM_STATE_DIR / "bin":
+            raise ValueError(f"RPM managed dependencies must use {RPM_STATE_DIR / 'bin'}")
         with self.connect() as db:
             db.executemany(
                 "INSERT INTO configuration VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",

@@ -1,4 +1,5 @@
 import stat
+import json
 
 import pytest
 
@@ -15,6 +16,57 @@ def test_migration_is_once_and_database_is_private(tmp_path):
     assert "UNRELATED_SECRET" not in store.values()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert ConfigStore(path).settings().plex_token == "legacy"
+
+
+def test_rpm_dependencies_use_state_bin_not_music(tmp_path, monkeypatch):
+    monkeypatch.setattr("config_store.RPM_STATE_DIR", tmp_path)
+    store = ConfigStore(tmp_path / "config.sqlite3")
+    store.initialize({"DOWNLOAD_DIR": str(tmp_path / "music"), "DEPENDENCY_DIR": str(tmp_path / "music")})
+    assert store.settings().get("DEPENDENCY_DIR") == str(tmp_path / "bin")
+    with pytest.raises(ValueError, match="RPM managed dependencies"):
+        store.save({**store.values(), "DEPENDENCY_DIR": str(tmp_path / "music")})
+
+
+def test_rpm_migrates_tools_and_manifests_without_moving_music(tmp_path, monkeypatch):
+    from dependencies import resolve_tool
+    store = ConfigStore(tmp_path / "config.sqlite3")
+    previous = tmp_path / "music"
+    store.initialize({"DEPENDENCY_DIR": str(previous), "SPOTDL_MODE": "managed"})
+    binary = previous / "spotdl/v1/spotdl"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o700)
+    (previous / "song.mp3").write_bytes(b"music")
+    manifest = {"binary": str(binary), "version": "v1"}
+    (previous / "spotdl/current.json").write_text(json.dumps(manifest))
+    monkeypatch.setattr("config_store.RPM_STATE_DIR", tmp_path)
+    (tmp_path / "bin").mkdir(mode=0o750)
+    assert not store.initialize({})
+    expected = tmp_path / "bin/spotdl/v1/spotdl"
+    assert resolve_tool(store.settings(), "spotdl") == str(expected)
+    assert expected.read_text() == binary.read_text()
+    assert stat.S_IMODE(expected.stat().st_mode) == 0o700
+    assert binary.exists()
+    assert not (tmp_path / "bin/song.mp3").exists()
+    assert not store.initialize({})
+    # A retry after publication but before the SQLite commit uses the same migration.
+    with store.connect() as db:
+        db.execute("UPDATE configuration SET value=? WHERE key='DEPENDENCY_DIR'", (str(previous),))
+    assert not store.initialize({})
+    assert resolve_tool(store.settings(), "spotdl") == str(expected)
+
+
+def test_rpm_dependency_migration_does_not_overwrite_existing_tools(tmp_path, monkeypatch):
+    store = ConfigStore(tmp_path / "config.sqlite3")
+    previous = tmp_path / "dependencies"
+    store.initialize({})
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin/keep").write_text("keep")
+    monkeypatch.setattr("config_store.RPM_STATE_DIR", tmp_path)
+    with pytest.raises(ValueError, match="not empty"):
+        store.initialize({})
+    assert store.values()["DEPENDENCY_DIR"] == str(previous)
+    assert (tmp_path / "bin/keep").read_text() == "keep"
 
 
 def test_dotenv_imports_custom_provider_settings(tmp_path, monkeypatch):

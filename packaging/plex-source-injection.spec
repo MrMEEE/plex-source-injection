@@ -74,6 +74,7 @@ sed -i -e 's|@PYTHON@|%{python_executable}|g' -e 's|@LIBDIR@|%{libdir}|g' \
 install -D -m 0644 packaging/plex-source-injection.service \
     %{buildroot}%{_unitdir}/plex-source-injection.service
 install -d -m 0750 %{buildroot}%{_localstatedir}/lib/plex-source-injection
+install -d -m 0750 %{buildroot}%{_localstatedir}/lib/plex-source-injection/bin
 # Keep third-party license files and distribution metadata in the pythonlibs RPM.
 find %{buildroot} -type d -name __pycache__ -prune -exec rm -rf {} +
 
@@ -100,6 +101,7 @@ getent passwd plex-source-injection >/dev/null || \
 %{_bindir}/plex-inject-passwd
 %{_unitdir}/plex-source-injection.service
 %attr(0750,plex-source-injection,plex-source-injection) %dir /var/lib/plex-source-injection
+%attr(0750,plex-source-injection,plex-source-injection) %dir /var/lib/plex-source-injection/bin
 
 %files pythonlibs
 %{_libdir}/plex-source-injection

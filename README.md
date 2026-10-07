@@ -100,6 +100,9 @@ sudo journalctl -u plex-source-injection -f
 Replace version/EL suffixes with your chosen release. The dedicated
 `plex-source-injection` system user owns `/var/lib/plex-source-injection`. SQLite,
 managed executables and caches live there, outside the installed application.
+The RPM creates `/var/lib/plex-source-injection/bin` with service-user ownership
+and mode `0750`. Managed spotdl, yt-dlp and FFmpeg are installed and executed from
+versioned subdirectories there, independently of all media download locations.
 Packages do **not** ship credentials or a database, enable/start the service at install,
 or erase state on removal. Set the password explicitly before enabling the service.
 The `plex-inject-passwd` command is installed in `/usr/bin` (on the system PATH).
@@ -120,9 +123,28 @@ still require FFmpeg and (for Spotify) spotdl via managed dependencies or extern
 executables; these tools are not part of `-pythonlibs`.
 
 The service runs without root, uses a restrictive umask, restarts after failures and
-allows ten minutes for graceful shutdown. `ProtectHome=true` prevents downloading to
-home directories; use a media/state path instead or explicitly adjust a systemd
-override. For packaged installations use `systemctl start/stop/restart
+allows ten minutes for graceful shutdown. `ProtectHome=false` permits access to
+home directories, but does not grant filesystem permissions. The service user needs
+execute (traversal) permission on every parent directory and write/execute permission
+on the selected download directory. Prefer targeted ACLs rather than making a home
+directory world-writable or running the service as root. For example:
+
+```bash
+sudo setfacl -m u:plex-source-injection:--x /home/mj /home/mj/Musik
+sudo setfacl -m u:plex-source-injection:rwx /home/mj/Musik/Download
+sudo -u plex-source-injection test -w /home/mj/Musik/Download
+```
+
+Create the download directory first and adapt these paths to your installation.
+Existing media subdirectories also need suitable permissions for writing and cleanup.
+`UMask=0077` keeps newly created files private unless directory default ACLs grant
+access; configure appropriate access/default ACLs for Plex if it uses another account.
+`ProtectSystem=full` makes `/usr`, `/boot` and `/etc` read-only, not `/home`, so it can
+remain enabled. `PrivateTmp` and `NoNewPrivileges` can also remain enabled.
+On SELinux-enforcing hosts, check audit denials if ordinary permissions are correct;
+use appropriate labels/policy rather than disabling SELinux.
+After changing the unit or a drop-in, run `systemctl daemon-reload` and restart the
+service. For packaged installations use `systemctl start/stop/restart
 plex-source-injection`, not the source-checkout lifecycle script.
 
 To rebuild locally with Docker:
@@ -301,8 +323,14 @@ active requests can finish. Select and install an older verified release to roll
 FFmpeg's rolling `latest` tag is identified additionally by its asset digest; rollback
 requires an upstream release still available on GitHub. GitHub API rate limits apply.
 
-Files are stored by default in `dependencies/` beside the SQLite database, organized
-by tool/version/digest. `DEPENDENCY_DIR` can be changed on the Custom settings page.
+Source checkouts store files by default in `dependencies/` beside the SQLite database,
+organized by tool/version/digest. `DEPENDENCY_DIR` can be changed on the Custom settings
+page for source checkouts. Standard RPM installations use the fixed directory
+`/var/lib/plex-source-injection/bin`. On first startup after upgrading, existing managed
+tool directories and manifests are copied to this location and saved executable paths
+are updated automatically. Original files are retained for recovery; unrelated media
+files are not copied. Migration refuses to overwrite a nonempty destination from an
+unrelated installation and reports an error rather than selecting missing executables.
 FFmpeg is shared by Spotify and YouTube: changing its mode/path affects both.
 For an external binary, specify its executable name or absolute path. External/bundled
 dependency updates remain your responsibility; the UI never modifies them.
@@ -455,7 +483,7 @@ is retained as an optional first-run import template, not an ongoing configurati
 | `SPOTDL_MODE` / `SPOTDL_BINARY` | `external` / `spotdl` | Managed release or your own executable |
 | `YTDLP_MODE` / `YTDLP_BINARY` | `bundled` / `yt-dlp` | Bundled Python package, managed release, or external CLI |
 | `FFMPEG_MODE` / `FFMPEG_BINARY` | `external` / `ffmpeg` | Shared FFmpeg source; ffprobe must be alongside an external binary |
-| `DEPENDENCY_DIR` | `dependencies/` beside SQLite | Absolute path for managed version files |
+| `DEPENDENCY_DIR` | `dependencies/` beside SQLite; RPM: `/var/lib/plex-source-injection/bin` | Absolute path for managed version files; fixed for standard RPM installs |
 
 ## Adding a provider
 
