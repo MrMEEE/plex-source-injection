@@ -19,6 +19,16 @@ logger = logging.getLogger(__name__)
 PlexLookup = Callable[[str, Optional[str]], Optional[str]]
 
 
+def title_from_filename(filename: str, item_id: str) -> str | None:
+    """Recover the track title from ``"<artist> - <title> [<item_id>].<ext>"``."""
+    stem = filename.rsplit(".", 1)[0]
+    marker = f" [{item_id}]"
+    if stem.endswith(marker):
+        stem = stem[: -len(marker)]
+    title = stem.split(" - ", 1)[-1].strip()
+    return title or None
+
+
 class IngestError(Exception):
     """Raised when an external item could not be downloaded or registered in Plex."""
 
@@ -136,6 +146,7 @@ class Ingestor:
             except ProviderError as exc:
                 raise IngestError(str(exc)) from exc
         logger.info("Downloaded %s to %s", external_id, path)
+        title = title or title_from_filename(path.name, item_id)
 
         await self.trigger_scan()
         return await self.wait_for_rating_key(item_id, title)

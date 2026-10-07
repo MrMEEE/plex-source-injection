@@ -41,6 +41,7 @@ class YouTubeProvider(BaseProvider):
     def __init__(self, settings: Any) -> None:
         super().__init__(settings)
         self.api_key = settings.get("YOUTUBE_API_KEY")
+        self._http: httpx.AsyncClient | None = None
 
     # -- search -------------------------------------------------------------
     async def search(self, query: str, limit: int) -> list[ExternalTrack]:
@@ -57,8 +58,9 @@ class YouTubeProvider(BaseProvider):
             "q": query,
             "key": self.api_key,
         }
-        async with httpx.AsyncClient(timeout=self.settings.provider_timeout) as client:
-            response = await client.get(YOUTUBE_API_SEARCH_URL, params=params)
+        if self._http is None:
+            self._http = httpx.AsyncClient(timeout=self.settings.provider_timeout)
+        response = await self._http.get(YOUTUBE_API_SEARCH_URL, params=params)
         if response.status_code != 200:
             raise ProviderError(f"YouTube API returned HTTP {response.status_code}")
         tracks = []

@@ -157,7 +157,10 @@ def create_app(
             return False
         if response.status_code == 200:
             if token:
-                cache[cache_key] = time.monotonic() + AUTH_CACHE_TTL
+                now = time.monotonic()
+                for key in [k for k, expiry in cache.items() if expiry <= now]:
+                    del cache[key]
+                cache[cache_key] = now + AUTH_CACHE_TTL
             return True
         return False
 
@@ -233,14 +236,16 @@ def create_app(
             _upstream_url(_raw_path(request), request.url.query),
             headers=_request_headers(request),
         )
-        if query.strip() and len(registry) and await client_authorized(request):
-            external_search = search_external(
+
+        async def gated_external_search() -> list[dict[str, Any]]:
+            if not query.strip() or not len(registry) or not await client_authorized(request):
+                return []
+            return await search_external(
                 registry, query, settings.search_limit, settings.provider_timeout
             )
-        else:
-            external_search = asyncio.sleep(0, result=[])
+
         upstream, external = await asyncio.gather(
-            client.send(upstream_request), external_search, return_exceptions=True
+            client.send(upstream_request), gated_external_search(), return_exceptions=True
         )
         if isinstance(upstream, BaseException):
             logger.warning("Upstream search failed: %s", upstream)

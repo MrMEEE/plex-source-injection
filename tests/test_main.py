@@ -126,8 +126,8 @@ def test_hubs_search_injects_external_results(settings, upstream):
     assert yt.searches[0][0] == "never" and sp.searches[0][0] == "never"
     assert int(response.headers["content-length"]) == len(response.content)
 
-    assert upstream.paths() == ["/library/sections/3", "/hubs/search"]
-    forwarded = upstream.requests[1]
+    assert sorted(upstream.paths()) == ["/hubs/search", "/library/sections/3"]
+    forwarded = next(r for r in upstream.requests if r.url.path == "/hubs/search")
     assert forwarded.url.params["query"] == "never" and forwarded.url.params["limit"] == "5"
     assert forwarded.headers["X-Plex-Client-Identifier"] == "amp"
     assert forwarded.url.host == "plex.test"

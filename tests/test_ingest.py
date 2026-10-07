@@ -126,3 +126,24 @@ def test_plex_api_lookup_matches_filename_marker(settings):
     assert lookup("abc", "Song") == "7"
     assert lookup("abcd", None) == "1"
     assert section.calls[0]["sort"] == "addedAt:desc" and section.calls[0]["libtype"] == "track"
+
+
+def test_title_from_filename():
+    from ingest import title_from_filename
+
+    assert title_from_filename("Artist - Some - Song [a_b].mp3", "a_b") == "Some - Song"
+    assert title_from_filename("Song [x].flac", "x") == "Song"
+
+
+def test_poll_uses_filename_title_when_metadata_unavailable(settings):
+    provider = FakeProvider(settings, tracks=[track("abc")])
+
+    async def broken_metadata(item_id):
+        raise RuntimeError("metadata down")
+
+    provider.fetch_metadata = broken_metadata
+    lookup, scans = FakeLookup(), []
+    ingestor = make_ingestor(settings, provider, lookup, scans)
+    assert asyncio.run(ingestor.download_and_register("ext_fk_abc")) == "4242"
+    assert lookup.calls[0] == ("abc", None)
+    assert lookup.calls[-1] == ("abc", "Title")
