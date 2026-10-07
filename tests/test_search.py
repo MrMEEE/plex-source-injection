@@ -100,3 +100,19 @@ def test_inject_into_flat_metadata_and_empty_containers():
 
     unchanged = {"MediaContainer": {"size": 0}}
     assert inject_results(unchanged, []) == {"MediaContainer": {"size": 0}}
+def test_category_permissions_filter_music_results(settings):
+    import asyncio
+    from dataclasses import replace
+
+    from providers import ProviderRegistry
+    from search import search_external
+    from tests.conftest import FakeProvider, track
+
+    provider = FakeProvider(replace(settings, env={"FAKE_CATEGORIES": ""}), tracks=[track("abc")])
+    registry = ProviderRegistry([provider])
+    assert asyncio.run(search_external(registry, "song", 10, 1)) == []
+    assert provider.searches == []
+    provider.settings = replace(settings, env={"FAKE_CATEGORIES": "music"})
+    assert asyncio.run(search_external(registry, "song", 10, 1, categories={"videos"})) == []
+    assert provider.searches == []
+    assert len(asyncio.run(search_external(registry, "song", 10, 1, categories={"music"}))) == 1

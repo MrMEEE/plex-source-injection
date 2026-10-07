@@ -1,0 +1,11 @@
+ARG EL_VERSION=9
+FROM registry.access.redhat.com/ubi${EL_VERSION}/ubi:latest
+ARG EL_VERSION
+RUN if [ "$EL_VERSION" = 9 ]; then \
+      dnf install -y rpm-build redhat-rpm-config systemd-rpm-macros python3.12 python3.12-pip tar gzip findutils systemd shadow-utils; \
+    else \
+      dnf install -y rpm-build redhat-rpm-config systemd-rpm-macros python3 python3-pip tar gzip findutils systemd shadow-utils; \
+    fi \
+    && dnf clean all
+ENV EL_VERSION=${EL_VERSION}
+ENTRYPOINT ["/bin/bash", "/source/packaging/build-rpm.sh"]

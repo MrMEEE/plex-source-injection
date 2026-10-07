@@ -111,6 +111,8 @@ def test_plex_api_lookup_matches_filename_marker(settings):
         return SimpleNamespace(ratingKey=key, media=[SimpleNamespace(parts=[SimpleNamespace(file=file)])])
 
     class Section:
+        type = "artist"
+
         def __init__(self):
             self.calls = []
 
@@ -126,6 +128,22 @@ def test_plex_api_lookup_matches_filename_marker(settings):
     assert lookup("abc", "Song") == "7"
     assert lookup("abcd", None) == "1"
     assert section.calls[0]["sort"] == "addedAt:desc" and section.calls[0]["libtype"] == "track"
+
+
+def test_movie_library_rejected_before_track_search_or_download(settings):
+    from types import SimpleNamespace
+    from ingest import PlexApiLookup
+
+    calls = []
+    lookup = PlexApiLookup(settings)
+    lookup._section = SimpleNamespace(type="movie", title="Movies", search=lambda **kwargs: calls.append(kwargs))
+    provider = FakeProvider(settings, tracks=[track("abc")])
+    ingestor = Ingestor(settings, ProviderRegistry([provider]), plex_lookup=lookup)
+    with pytest.raises(IngestError, match="MUSIC_SECTION_ID=3.*Movies.*movie.*Music"):
+        asyncio.run(ingestor.download_and_register("ext_fk_abc"))
+    assert calls == []
+    assert provider.downloads == []
+    assert not settings.download_dir.exists()
 
 
 def test_title_from_filename():

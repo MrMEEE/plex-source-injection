@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Plex Source Injection | Settings</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css">
+  <script src="/admin/assets/admin.js" defer></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to settings</a>
+<header class="topbar">
+  <a class="brand" href="#general"><span class="brand-mark" aria-hidden="true">&gt;</span>
+    <span>Source Injection<span class="brand-caption">FOR PLEX</span></span></a>
+  <span class="topbar-label">Server settings</span>
+  <span class="admin-badge">ADMIN</span>
+  <button id="logout" class="button-secondary" type="button">Sign out</button>
+</header>
+<div class="app-layout">
+  <aside class="sidebar">
+    <p class="nav-heading">MANAGE</p>
+    <nav id="navigation" aria-label="Settings pages"></nav>
+    <div class="sidebar-footer"><span class="connection-dot" aria-hidden="true"></span>
+      <span id="connection">Connecting...</span><small>SQLite configuration</small></div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <div class="page-heading">
+      <div><p class="eyebrow">SOURCE INJECTION / SETTINGS</p>
+        <h1 id="page-title">Settings</h1><p id="page-description">Manage your Plex music sources.</p></div>
+      <span id="dirty-badge" class="badge" hidden>Unsaved changes</span>
+    </div>
+    <div id="restart-notice" class="notice" role="status" hidden></div>
+    <p id="status" class="status" role="status" aria-live="polite">Loading configuration...</p>
+    <form id="configuration" novalidate>
+      <div id="pages"></div>
+      <footer class="save-bar">
+        <div><strong id="save-hint">Configuration is up to date</strong>
+          <small>Applies to new requests. Active playback is not interrupted.</small></div>
+        <div class="actions">
+          <button id="reload" type="button" class="button-secondary">Reload</button>
+          <button id="save" type="submit" class="button-primary" disabled>Save changes</button>
+        </div>
+      </footer>
+    </form>
+    <p class="footnote">Secrets stay hidden and are preserved when left blank. Use HTTPS or an SSH tunnel for remote administration.</p>
+  </main>
+</div>
+</body>
+</html>

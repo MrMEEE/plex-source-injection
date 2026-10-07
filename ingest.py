@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import httpx
@@ -12,6 +13,7 @@ import httpx
 from config import Settings
 from providers import ProviderError, ProviderRegistry
 from providers.base import find_downloaded_file
+from plex_libraries import PlexLibraryError, validate_music_section
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,10 @@ class IngestError(Exception):
     """Raised when an external item could not be downloaded or registered in Plex."""
 
 
+class IngestConfigurationError(IngestError):
+    """A non-retryable library configuration error."""
+
+
 class ItemNotFoundError(LookupError):
     """Raised when the provider reports that the requested item does not exist."""
 
@@ -49,9 +55,20 @@ class PlexApiLookup:
     def _get_section(self) -> Any:
         if self._section is None:
             from plexapi.server import PlexServer
+            from plexapi.exceptions import NotFound
 
             server = PlexServer(self.settings.plex_url, self.settings.plex_token, timeout=30)
-            self._section = server.library.sectionByID(self.settings.music_section_id)
+            try:
+                self._section = server.library.sectionByID(self.settings.music_section_id)
+            except NotFound as exc:
+                raise IngestConfigurationError(
+                    f"MUSIC_SECTION_ID={self.settings.music_section_id} was not found. "
+                    "Open General, load Plex music libraries, select a Music library and save."
+                ) from exc
+        try:
+            validate_music_section(self._section, self.settings.music_section_id)
+        except PlexLibraryError as exc:
+            raise IngestConfigurationError(str(exc)) from exc
         return self._section
 
     def __call__(self, item_id: str, title: str | None) -> str | None:
@@ -90,6 +107,26 @@ class Ingestor:
     def clear_cache(self) -> None:
         self._cache.clear()
 
+    def share_download_state(self, previous: "Ingestor") -> None:
+        """Preserve deduplication when generations use the same Plex library and paths."""
+        def identity(settings: Settings) -> tuple[str, int, Path, str]:
+            return (
+                settings.plex_url, settings.music_section_id,
+                settings.download_dir, settings.plex_download_dir,
+            )
+        if identity(self.settings) == identity(previous.settings):
+            self._cache = previous._cache
+            self._inflight = previous._inflight
+
+    async def wait_idle(self) -> None:
+        """Keep the upstream client alive until shielded downloads have finished."""
+        tasks = list(self._inflight.values())
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    logger.warning("Download failed while retiring configuration: %s", result)
+
     def forget(self, external_id: str) -> None:
         """Drop a cached mapping (e.g. when Plex no longer knows the ratingKey)."""
         self._cache.pop(external_id, None)
@@ -106,7 +143,13 @@ class Ingestor:
         if task is None:
             task = asyncio.create_task(self._ingest(external_id))
             self._inflight[external_id] = task
-            task.add_done_callback(lambda _t: self._inflight.pop(external_id, None))
+            def completed(job: asyncio.Task[str]) -> None:
+                self._inflight.pop(external_id, None)
+                if job.cancelled():
+                    logger.warning("Download/registration of %s was cancelled", external_id)
+                elif (error := job.exception()) is not None:
+                    logger.error("Download/registration of %s failed: %s", external_id, error)
+            task.add_done_callback(completed)
         # Shield so a disconnecting client does not abort a download others may await.
         rating_key = await asyncio.shield(task)
         self._cache[external_id] = rating_key
@@ -114,7 +157,9 @@ class Ingestor:
 
     async def _ingest(self, external_id: str) -> str:
         provider, item_id = self.registry.resolve(external_id)
-        download_dir = self.settings.download_dir
+        if "music" not in provider.enabled_categories:
+            raise IngestError(f"Music is disabled for {provider.display_name}")
+        download_dir = self.settings.download_location("music")
 
         title: str | None = None
         try:
@@ -149,12 +194,14 @@ class Ingestor:
         title = title or title_from_filename(path.name, item_id)
 
         await self.trigger_scan()
-        return await self.wait_for_rating_key(item_id, title)
+        rating_key = await self.wait_for_rating_key(item_id, title)
+        logger.info("Registered %s in Plex as ratingKey %s", external_id, rating_key)
+        return rating_key
 
     async def trigger_scan(self) -> None:
         """Request a partial scan of the download folder in the music section."""
         url = f"{self.settings.plex_url}/library/sections/{self.settings.music_section_id}/refresh"
-        params = {"path": self.settings.plex_download_dir}
+        params = {"path": self.settings.plex_download_location("music")}
         headers = {"X-Plex-Token": self.settings.plex_token, "Accept": "application/json"}
         client = self._http or httpx.AsyncClient(timeout=30)
         try:
@@ -173,6 +220,8 @@ class Ingestor:
         while True:
             try:
                 rating_key = await asyncio.to_thread(self._lookup, item_id, title)
+            except IngestConfigurationError:
+                raise
             except Exception:
                 logger.warning("Plex lookup failed while polling for %s", item_id, exc_info=True)
                 rating_key = None

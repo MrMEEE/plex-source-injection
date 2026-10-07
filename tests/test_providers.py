@@ -171,3 +171,72 @@ def test_spotdl_credentials_only_passed_when_opted_in(tmp_path, monkeypatch, opt
     assert path.name == "A - B [4uLU6hMCjMI75M1A2tKUQC].mp3"
     assert ("secret" in captured["args"]) is expected
     assert "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC" in captured["args"]
+
+
+def test_youtube_external_cli_search_metadata_download(tmp_path, monkeypatch):
+    import asyncio
+    import json
+
+    calls = []
+    track_id = "abc123"
+
+    class Process:
+        returncode = 0
+
+        def __init__(self, args):
+            self.args = args
+
+        async def communicate(self):
+            if any(argument.startswith("ytsearch") for argument in self.args):
+                return json.dumps({"entries": [{"id": track_id, "title": "Artist - Song"}]}).encode(), b""
+            if "--skip-download" in self.args:
+                return json.dumps({"id": track_id, "title": "Artist - Song"}).encode(), b""
+            (tmp_path / f"Artist - Song [{track_id}].mp3").write_bytes(b"audio")
+            return b"", b""
+
+    async def execute(*args, **kwargs):
+        calls.append(args)
+        return Process(args)
+
+    monkeypatch.setattr("dependencies.shutil.which", lambda binary: "/provided/yt-dlp")
+    monkeypatch.setattr("providers.youtube.asyncio.create_subprocess_exec", execute)
+    provider = YouTubeProvider(Settings.from_env({"YTDLP_MODE": "external", "YTDLP_BINARY": "my-yt-dlp"}))
+    assert asyncio.run(provider.search("song", 5))[0].item_id == track_id
+    assert asyncio.run(provider.fetch_metadata(track_id)).title == "Song"
+    assert asyncio.run(provider.download(track_id, tmp_path)).is_file()
+    assert all(args[:2] == ("/provided/yt-dlp", "--ignore-config") for args in calls)
+    assert "--extract-audio" in calls[-1]
+
+
+def test_managed_spotdl_and_ffmpeg_paths_are_used(tmp_path, monkeypatch):
+    import asyncio
+    import json
+
+    root = tmp_path / "tools"
+    for name in ("spotdl", "ffmpeg"):
+        folder = root / name / "v1"
+        folder.mkdir(parents=True)
+        (folder / name).write_text("executable")
+        (root / name / "current.json").write_text(json.dumps({"binary": str(folder / name), "version": "v1"}))
+    settings = Settings.from_env({
+        "SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret",
+        "DEPENDENCY_DIR": str(root), "SPOTDL_MODE": "managed", "FFMPEG_MODE": "managed",
+    })
+    calls = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            (tmp_path / "Artist - Song [4uLU6hMCjMI75M1A2tKUQC].mp3").write_bytes(b"audio")
+            return b"", None
+
+    async def execute(*args, **kwargs):
+        calls.append(args)
+        return Process()
+
+    monkeypatch.setattr("providers.spotify.asyncio.create_subprocess_exec", execute)
+    provider = SpotifyProvider(settings)
+    asyncio.run(provider.download("4uLU6hMCjMI75M1A2tKUQC", tmp_path))
+    assert calls[0][0] == str(root / "spotdl" / "v1" / "spotdl")
+    assert calls[0][-2:] == ("--ffmpeg", str(root / "ffmpeg" / "v1" / "ffmpeg"))

@@ -9,11 +9,13 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from dependencies import DependencyError, ffmpeg_location, resolve_tool
 from .base import (
     BaseProvider,
     ExternalTrack,
     ProviderConfigurationError,
     ProviderError,
+    ProviderSetting,
     find_downloaded_file,
 )
 from .registry import register_provider
@@ -30,6 +32,18 @@ class SpotifyProvider(BaseProvider):
     name = "spotify"
     prefix = "sp"
     display_name = "Spotify"
+    description = "Search Spotify with your app credentials and download audio with spotdl."
+    dependencies = ("spotdl", "ffmpeg")
+    config_fields = (
+        ProviderSetting("SPOTIFY_CLIENT_ID", "Client ID", "Required. From your Spotify developer application."),
+        ProviderSetting("SPOTIFY_CLIENT_SECRET", "Client secret", "Required. From your Spotify developer application."),
+        ProviderSetting("SPOTDL_BINARY", "spotdl executable", "Executable name or absolute path.", default="spotdl"),
+        ProviderSetting(
+            "SPOTDL_PASS_CREDENTIALS", "Pass credentials to spotdl",
+            "Exposes Spotify credentials in the process list. Off uses spotdl's own config.json.",
+            kind="switch", default="false",
+        ),
+    )
 
     def __init__(self, settings: Any) -> None:
         super().__init__(settings)
@@ -38,6 +52,15 @@ class SpotifyProvider(BaseProvider):
         if not self.client_id or not self.client_secret:
             raise ProviderConfigurationError("SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET not set")
         self.spotdl_binary = settings.get("SPOTDL_BINARY", "spotdl")
+        self.managed_binary: str | None = None
+        self.dependency_error: str | None = None
+        try:
+            if settings.get("SPOTDL_MODE", "external") == "managed":
+                self.managed_binary = resolve_tool(settings, "spotdl")
+            self.ffmpeg_path = ffmpeg_location(settings)
+        except DependencyError as exc:
+            self.dependency_error = str(exc)
+            self.ffmpeg_path = None
         # Passing credentials on the command line exposes them in the process list, so it is
         # opt-in; by default spotdl uses the credentials from its own config.json.
         self.pass_credentials = (settings.get("SPOTDL_PASS_CREDENTIALS", "false") or "").lower() in (
@@ -104,7 +127,9 @@ class SpotifyProvider(BaseProvider):
     async def download(self, item_id: str, output_dir: Path) -> Path:
         if not SPOTIFY_ID_RE.match(item_id):
             raise ProviderError(f"Invalid Spotify track id: {item_id!r}")
-        binary = shutil.which(self.spotdl_binary)
+        if self.dependency_error:
+            raise ProviderError(self.dependency_error)
+        binary = self.managed_binary or shutil.which(self.spotdl_binary)
         if binary is None:
             raise ProviderError(f"spotdl executable {self.spotdl_binary!r} not found in PATH")
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -119,6 +144,8 @@ class SpotifyProvider(BaseProvider):
         ]
         if self.pass_credentials:
             args += ["--client-id", self.client_id, "--client-secret", self.client_secret]
+        if self.ffmpeg_path:
+            args += ["--ffmpeg", self.ffmpeg_path]
         process = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
         )

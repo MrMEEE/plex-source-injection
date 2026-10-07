@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import json
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-from .base import BaseProvider, ExternalTrack, ProviderError, find_downloaded_file
+from .base import BaseProvider, ExternalTrack, ProviderError, ProviderSetting, find_downloaded_file
 from .registry import register_provider
+from dependencies import DependencyError, ffmpeg_location, resolve_tool
 
 logger = logging.getLogger(__name__)
 
@@ -37,17 +39,59 @@ class YouTubeProvider(BaseProvider):
     name = "youtube"
     prefix = "yt"
     display_name = "YouTube"
+    description = "Search YouTube and download audio with yt-dlp. An API key is optional."
+    dependencies = ("yt-dlp", "ffmpeg")
+    config_fields = (
+        ProviderSetting(
+            "YOUTUBE_API_KEY", "YouTube API key",
+            "Optional. Without a key, searches use yt-dlp instead of the YouTube Data API.",
+        ),
+    )
 
     def __init__(self, settings: Any) -> None:
         super().__init__(settings)
         self.api_key = settings.get("YOUTUBE_API_KEY")
         self._http: httpx.AsyncClient | None = None
+        self.binary: str | None = None
+        self.dependency_error: str | None = None
+        try:
+            if settings.get("YTDLP_MODE", "bundled") != "bundled":
+                self.binary = resolve_tool(settings, "yt-dlp")
+            self.ffmpeg_path = ffmpeg_location(settings)
+        except DependencyError as exc:
+            self.dependency_error = str(exc)
+            self.ffmpeg_path = None
 
     # -- search -------------------------------------------------------------
     async def search(self, query: str, limit: int) -> list[ExternalTrack]:
         if self.api_key:
             return await self._search_api(query, limit)
+        if self.dependency_error:
+            raise ProviderError(self.dependency_error)
+        if self.binary:
+            data = await self._cli("--dump-single-json", "--flat-playlist", "--skip-download", f"ytsearch{max(limit, 1)}:{query}")
+            return [
+                track for entry in json.loads(data).get("entries", [])
+                if entry and (track := self._entry_to_track(entry))
+            ]
         return await asyncio.to_thread(self._search_ytdlp, query, limit)
+
+    async def _cli(self, *args: str, timeout: float | None = None) -> str:
+        if self.binary is None:
+            raise ProviderError("No yt-dlp executable configured")
+        process = await asyncio.create_subprocess_exec(
+            self.binary, "--ignore-config", "--no-warnings", *args,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout or self.settings.provider_timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            process.kill()
+            await process.wait()
+            raise
+        if process.returncode:
+            raise ProviderError(f"yt-dlp exited with {process.returncode}: {stderr.decode(errors='replace')[-300:]}")
+        return stdout.decode()
 
     async def _search_api(self, query: str, limit: int) -> list[ExternalTrack]:
         params = {
@@ -124,6 +168,12 @@ class YouTubeProvider(BaseProvider):
 
     # -- metadata -----------------------------------------------------------
     async def fetch_metadata(self, item_id: str) -> ExternalTrack | None:
+        if self.dependency_error:
+            raise ProviderError(self.dependency_error)
+        if self.binary:
+            return self._entry_to_track(json.loads(await self._cli(
+                "--dump-single-json", "--skip-download", "--no-playlist", WATCH_URL.format(id=item_id),
+            )))
         return await asyncio.to_thread(self._fetch_metadata_sync, item_id)
 
     def _fetch_metadata_sync(self, item_id: str) -> ExternalTrack | None:
@@ -139,8 +189,19 @@ class YouTubeProvider(BaseProvider):
 
     # -- download -----------------------------------------------------------
     async def download(self, item_id: str, output_dir: Path) -> Path:
+        if self.dependency_error:
+            raise ProviderError(self.dependency_error)
         output_dir.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(self._download_sync, item_id, output_dir)
+        if self.binary:
+            args = [
+                "--extract-audio", "--audio-format", self.settings.audio_format,
+                "--embed-metadata", "--no-playlist", "--output", str(output_dir / OUTPUT_TEMPLATE),
+            ]
+            if self.ffmpeg_path:
+                args += ["--ffmpeg-location", self.ffmpeg_path]
+            await self._cli(*args, WATCH_URL.format(id=item_id), timeout=self.settings.download_timeout)
+        else:
+            await asyncio.to_thread(self._download_sync, item_id, output_dir)
         path = find_downloaded_file(output_dir, item_id)
         if path is None:
             raise ProviderError(f"yt-dlp finished but no file found for {item_id}")
@@ -160,6 +221,8 @@ class YouTubeProvider(BaseProvider):
                 {"key": "FFmpegMetadata", "add_metadata": True},
             ],
         }
+        if self.ffmpeg_path:
+            opts["ffmpeg_location"] = self.ffmpeg_path
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([WATCH_URL.format(id=item_id)])

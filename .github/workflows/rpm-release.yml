@@ -1,0 +1,113 @@
+name: Build and release RPMs
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: UBI / EL${{ matrix.el }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        el: [9, 10]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject tracked runtime files
+        shell: bash
+        run: |
+          ignored="$(git ls-files -ci --exclude-standard)"
+          if [[ -n "$ignored" ]]; then
+            printf 'Ignored runtime/build files are already tracked:\n%s\n' "$ignored" >&2
+            exit 1
+          fi
+          git check-ignore config.sqlite3 config.sqlite3-wal config.sqlite3.bak \
+            .env .env.production .cache .run/proxy.log dependencies/spotdl/current.json \
+            dist/test.rpm >/dev/null
+      - name: Select RPM version
+        id: version
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=0.0.0
+          if [[ "$REF_TYPE" = tag ]]; then
+            version="${REF_NAME#v}"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "Release tags must be vMAJOR.MINOR.PATCH" >&2
+              exit 1
+            }
+            [[ "$(cat VERSION)" = "$version" ]] || {
+              echo "Release tag must match VERSION; use release.sh" >&2
+              exit 1
+            }
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build UBI builder image
+        run: docker build --build-arg EL_VERSION=${{ matrix.el }} -f packaging/Containerfile -t plex-rpm-builder:el${{ matrix.el }} .
+      - name: Build, install and test RPMs
+        env:
+          RPM_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist
+          docker run --rm -v "$PWD:/source:ro" -v "$PWD/dist:/output" \
+            plex-rpm-builder:el${{ matrix.el }} "$RPM_VERSION"
+      - name: Verify installation in a clean UBI image
+        env:
+          EL_VERSION: ${{ matrix.el }}
+        run: |
+          python=/usr/bin/python3
+          if [[ "$EL_VERSION" = 9 ]]; then python=/usr/bin/python3.12; fi
+          docker run --rm -v "$PWD/dist/el$EL_VERSION:/rpms:ro" \
+            -v "$PWD/packaging:/checks:ro" \
+            "registry.access.redhat.com/ubi$EL_VERSION/ubi:latest" \
+            bash -c 'dnf install -y /rpms/*.x86_64.rpm && bash /checks/smoke-rpm.sh "$1"' _ "$python"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-el${{ matrix.el }}
+          path: dist/el${{ matrix.el }}/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish tagged release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Publish RPMs, source archives and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          # Give platform-specific source archives and checksum files unique asset names.
+          mkdir release-assets
+          for el in 9 10; do
+            source="dist/rpm-el$el"
+            cp "$source"/*.rpm release-assets/
+            for archive in "$source"/*.tar.gz; do
+              name="$(basename "$archive" .tar.gz)"
+              cp "$archive" "release-assets/$name.el$el.tar.gz"
+            done
+          done
+          (cd release-assets && sha256sum ./* > SHA256SUMS)
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes --draft
+          fi
+          gh release upload "$TAG" release-assets/* --clobber
+          gh release edit "$TAG" --draft=false

@@ -73,6 +73,9 @@ class FakeIngestor:
     async def trigger_scan(self):
         pass
 
+    async def wait_idle(self):
+        pass
+
 
 @pytest.fixture
 def upstream():
@@ -171,6 +174,15 @@ def test_search_passes_through_non_json(settings, upstream):
         response = client.get("/hubs/search", params={"query": "q", "X-Plex-Token": "client-token"})
     assert response.status_code == 200
     assert response.text == '<MediaContainer size="0"/>'
+
+@pytest.mark.parametrize("media_type,expected", [("1", 0), ("2", 0), ("4", 0), ("10", 1), ("1,10", 1)])
+def test_media_type_restrictions(settings, upstream, media_type, expected):
+    provider = FakeProvider(settings, tracks=[track("abc")])
+    with build_client(settings, upstream, [provider]) as client:
+        assert client.get(
+            "/hubs/search", params={"query": "song", "type": media_type}, headers=JSON_HEADERS,
+        ).status_code == 200
+    assert len(provider.searches) == expected
 
 
 def test_search_returns_502_when_plex_down(settings):

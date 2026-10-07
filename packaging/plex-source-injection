@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+export CONFIG_DB="${CONFIG_DB:-/var/lib/plex-source-injection/config.sqlite3}"
+export PYTHONPATH="@LIBDIR@"
+export PYTHONDONTWRITEBYTECODE=1
+exec @PYTHON@ -s /usr/share/plex-source-injection/main.py "$@"

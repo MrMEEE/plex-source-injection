@@ -6,7 +6,7 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 if TYPE_CHECKING:
     from config import Settings
@@ -26,6 +26,21 @@ class ProviderError(Exception):
 
 class ProviderConfigurationError(ProviderError):
     """Raised when a provider cannot be initialised (e.g. missing credentials)."""
+
+
+@dataclass(frozen=True)
+class ProviderSetting:
+    """Declarative controls for a provider's admin page; secret keys use TOKEN/SECRET/KEY/PASSWORD."""
+
+    key: str
+    label: str
+    description: str = ""
+    kind: Literal["text", "number", "select", "switch"] = "text"
+    default: str = ""
+    choices: tuple[str, ...] = ()
+    minimum: float | None = None
+    maximum: float | None = None
+    step: str = "any"
 
 
 @dataclass(frozen=True)
@@ -91,6 +106,8 @@ class BaseProvider(ABC):
     * ``prefix`` – lowercase alphanumeric namespace used in synthetic ratingKeys
       (e.g. ``"yt"`` -> ``ext_yt_<id>``)
     * ``display_name`` – human readable source name shown in clients
+    * Optionally ``description`` and ``config_fields`` describe the provider's
+      admin page. Without fields, settings prefixed with the provider name are shown.
 
     Downloaded files must be written to ``output_dir`` with ``[<item_id>]`` right
     before the extension so they can be matched after the Plex scan.
@@ -102,12 +119,24 @@ class BaseProvider(ABC):
     name: ClassVar[str]
     prefix: ClassVar[str]
     display_name: ClassVar[str]
+    description: ClassVar[str] = ""
+    config_fields: ClassVar[tuple[ProviderSetting, ...]] = ()
+    supported_categories: ClassVar[tuple[str, ...]] = ("music",)
+    dependencies: ClassVar[tuple[str, ...]] = ()
 
     def __init__(self, settings: "Settings") -> None:
         self.settings = settings
 
     def external_id(self, item_id: str) -> str:
         return make_external_id(self.prefix, item_id)
+
+    @property
+    def enabled_categories(self) -> tuple[str, ...]:
+        raw = self.settings.env.get(f"{self.name.upper()}_CATEGORIES")
+        return self.supported_categories if raw is None else tuple(
+            category.strip() for category in raw.split(",")
+            if category.strip() in self.supported_categories
+        )
 
     @abstractmethod
     async def search(self, query: str, limit: int) -> list[ExternalTrack]:

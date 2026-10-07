@@ -1,0 +1,27 @@
+[Unit]
+Description=Plex Source Injection proxy and administration
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=plex-source-injection
+Group=plex-source-injection
+WorkingDirectory=/var/lib/plex-source-injection
+StateDirectory=plex-source-injection
+StateDirectoryMode=0750
+Environment=CONFIG_DB=/var/lib/plex-source-injection/config.sqlite3
+Environment=HOME=/var/lib/plex-source-injection
+Environment=XDG_CACHE_HOME=/var/lib/plex-source-injection/cache
+ExecStart=/usr/bin/plex-source-injection
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=600s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

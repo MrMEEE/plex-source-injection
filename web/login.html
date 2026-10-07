@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Sign in | Plex Source Injection</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css">
+</head>
+<body class="login-body">
+<main class="login-card">
+  <div class="brand"><span class="brand-mark" aria-hidden="true">&gt;</span>
+    <span>Source Injection<span class="brand-caption">FOR PLEX</span></span></div>
+  <p class="eyebrow">ADMINISTRATION</p>
+  <h1>Welcome back</h1>
+  <p class="login-description">Sign in to manage your music sources and server settings.</p>
+  <p class="login-error" role="alert">__ERROR__</p>
+  <form method="post" action="/admin/login">
+    <input type="hidden" name="csrf" value="__CSRF__">
+    <label for="username">Username</label>
+    <input id="username" name="username" autocomplete="username" value="admin" required maxlength="128">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
+    <button type="submit" class="button-primary">Sign in</button>
+  </form>
+  <p class="footnote">Password recovery: run <code>python main.py --set-admin-password</code> on the server.
+    Use HTTPS or an SSH tunnel for remote access.</p>
+</main>
+</body>
+</html>

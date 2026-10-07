@@ -35,13 +35,14 @@ def to_plex_track(provider: BaseProvider, track: ExternalTrack) -> dict[str, Any
 async def _search_provider(
     provider: BaseProvider, query: str, limit: int, timeout: float
 ) -> list[dict[str, Any]]:
+    logger.info("Searching %s for %r (limit %d)", provider.name, query, limit)
     try:
         tracks = await asyncio.wait_for(provider.search(query, limit), timeout=timeout)
     except asyncio.TimeoutError:
-        logger.warning("Provider %s timed out after %.1fs", provider.name, timeout)
+        logger.warning("Provider %s search %r timed out after %.1fs", provider.name, query, timeout)
         return []
     except Exception:
-        logger.exception("Provider %s search failed", provider.name)
+        logger.exception("Provider %s search %r failed", provider.name, query)
         return []
     items = []
     for track in tracks[:limit]:
@@ -49,18 +50,24 @@ async def _search_provider(
             items.append(to_plex_track(provider, track))
         except ValueError:
             logger.warning("Provider %s returned invalid item id %r", provider.name, track.item_id)
+    logger.info("Search %s for %r returned %d result(s): %s", provider.name, query, len(items),
+                "; ".join(f"{item['title']} [{item['ratingKey']}]" for item in items))
     return items
 
 
 async def search_external(
-    registry: ProviderRegistry, query: str, limit: int, timeout: float
+    registry: ProviderRegistry, query: str, limit: int, timeout: float,
+    categories: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Query every enabled provider concurrently; failures yield no items for that provider."""
     query = query.strip()
     if not query or not len(registry):
         return []
     results = await asyncio.gather(
-        *(_search_provider(p, query, limit, timeout) for p in registry.providers)
+        *(
+            _search_provider(p, query, limit, timeout) for p in registry.providers
+            if "music" in p.enabled_categories and (categories is None or "music" in categories)
+        )
     )
     return [item for items in results for item in items]
 
