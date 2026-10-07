@@ -16,7 +16,7 @@ mkdir -p "$TOP/$NAME"
 # Explicit source allowlist: never include runtime databases, caches, secrets,
 # managed executables or arbitrary untracked files in release archives.
 cd /source
-tar -cf - LICENSE README.md .env.example requirements.txt requirements-dev.txt \
+tar -cf - LICENSE README.md .gitignore .env.example requirements.txt requirements-dev.txt \
     main.py config.py config_store.py cleanup.py ingest.py search.py runtime.py \
     web_admin.py admin_access.py admin_sessions.py activity_log.py listeners.py \
     dependencies.py plex_libraries.py plex_login.py service.sh release.sh VERSION \
