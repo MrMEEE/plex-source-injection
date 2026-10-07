@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+if [ "$#" -ne 0 ]; then
+    echo "Usage: sudo plex-inject-passwd (password is prompted interactively)" >&2
+    exit 2
+fi
+if [ "$(id -u)" -eq 0 ]; then
+    exec /usr/sbin/runuser -u plex-source-injection -- /usr/bin/plex-source-injection --set-admin-password
+fi
+if [ "$(id -un)" != plex-source-injection ]; then
+    echo "Run sudo plex-inject-passwd or run it as the plex-source-injection service user." >&2
+    exit 1
+fi
+exec /usr/bin/plex-source-injection --set-admin-password

@@ -111,7 +111,7 @@ def install_admin(app: FastAPI, store: ConfigStore, listening_port: int, admin_p
     async def authorized(request: Request) -> None:
         password_hash = store.password_hash()
         if password_hash is None:
-            raise HTTPException(503, "Admin interface locked. Run python main.py --set-admin-password")
+            raise HTTPException(503, "Admin interface locked. Run sudo plex-inject-passwd (RPM) or python main.py --set-admin-password (source checkout) on the server.")
         same_origin(request)
         session = sessions.get(request, password_hash)
         if session is None:
@@ -132,7 +132,7 @@ def install_admin(app: FastAPI, store: ConfigStore, listening_port: int, admin_p
     async def get_login(request: Request) -> Response:
         same_origin(request)
         if store.password_hash() is None:
-            return login_page("Admin interface locked. Run python main.py --set-admin-password on the server.", 503)
+            return login_page("Admin interface locked. Run sudo plex-inject-passwd (RPM) or python main.py --set-admin-password (source checkout) on the server.", 503)
         if sessions.get(request, store.password_hash()) is not None:
             return RedirectResponse("/admin/", status_code=303, headers={"Cache-Control": "no-store"})
         return login_page()
@@ -141,7 +141,7 @@ def install_admin(app: FastAPI, store: ConfigStore, listening_port: int, admin_p
     async def submit_login(request: Request) -> Response:
         same_origin(request)
         if store.password_hash() is None:
-            return login_page("Admin interface locked. Run python main.py --set-admin-password on the server.", 503)
+            return login_page("Admin interface locked. Run sudo plex-inject-passwd (RPM) or python main.py --set-admin-password (source checkout) on the server.", 503)
         if request.headers.get("content-type", "").split(";")[0] != "application/x-www-form-urlencoded":
             raise HTTPException(415, "Login requires a form submission")
         body = bytearray()

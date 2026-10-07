@@ -72,9 +72,9 @@ resolve the remote issue and push those existing refs rather than rerunning the 
 GitHub Actions builds x86-64 RPMs in the official Red Hat **UBI 9** and **UBI 10**
 images. Release tags must use `vMAJOR.MINOR.PATCH` (for example, `v0.1.0`). Pushing a
 version tag builds and tests both platforms, then publishes their RPMs, source RPMs,
-application source archives and `SHA256SUMS` to a GitHub Release. Pull requests, pushes
-to `main`, and manual workflow runs also build/test RPMs, but only upload Actions
-artifacts; they do not publish releases. Untagged CI packages use version `0.0.0`.
+application source archives and `SHA256SUMS` to a GitHub Release. The RPM workflow
+runs only on version-tag pushes, not on branch commits or pull requests, and has
+no manual trigger. Tags must match `VERSION`; invalid tags fail before RPM builds.
 
 Each platform produces two matching packages:
 
@@ -91,7 +91,7 @@ Then install them together, for example on EL9:
 ```bash
 sudo dnf install ./plex-source-injection-0.1.0-1.el9.x86_64.rpm \
   ./plex-source-injection-pythonlibs-0.1.0-1.el9.x86_64.rpm
-sudo -u plex-source-injection plex-source-injection --set-admin-password
+sudo plex-inject-passwd
 sudo systemctl enable --now plex-source-injection
 sudo systemctl status plex-source-injection
 sudo journalctl -u plex-source-injection -f
@@ -102,6 +102,14 @@ Replace version/EL suffixes with your chosen release. The dedicated
 managed executables and caches live there, outside the installed application.
 Packages do **not** ship credentials or a database, enable/start the service at install,
 or erase state on removal. Set the password explicitly before enabling the service.
+The `plex-inject-passwd` command is installed in `/usr/bin` (on the system PATH).
+Run `sudo plex-inject-passwd` to set or reset the administrator password; it prompts
+twice and runs as the service user so database ownership is preserved. Passwords
+must be at least 12 characters; the login username is `admin`. It can also be run
+directly as the `plex-source-injection` service user. No service restart is needed.
+The helper uses the RPM launcher, including its platform-specific Python interpreter
+and private `plex-source-injection-pythonlibs` dependencies; no virtual environment
+or system-wide pip installation is needed.
 Ports default to Plex `32399` and admin `32300`; restrict the admin port with your
 firewall and keep the existing network allowlist/HTTPS guidance.
 

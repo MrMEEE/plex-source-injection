@@ -132,8 +132,13 @@ def test_admin_locked_without_password(tmp_path):
     store = ConfigStore(tmp_path / "config.sqlite3")
     store.initialize({})
     with TestClient(create_app(store=store, enable_cleanup=False), client=("127.0.0.1", 50000)) as client:
-        assert client.get("/admin/api/config").status_code == 503
-        assert client.get("/admin/login").status_code == 503
+        response = client.get("/admin/api/config")
+        assert response.status_code == 503
+        assert "sudo plex-inject-passwd" in response.json()["detail"]
+        response = client.get("/admin/login")
+        assert response.status_code == 503
+        assert "sudo plex-inject-passwd" in response.text
+        assert "python main.py --set-admin-password" in response.text
 
 
 def test_secrets_redacted_preserved_replaced_and_cleared(admin):

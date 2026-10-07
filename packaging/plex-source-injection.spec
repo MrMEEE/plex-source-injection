@@ -32,6 +32,7 @@ Requires:       %{name}-pythonlibs%{?_isa} = %{version}-%{release}
 Requires:       %{python_package}
 Requires:       python(abi) = 3.12
 Requires:       systemd
+Requires:       util-linux
 Requires(pre):  shadow-utils
 Requires(post): systemd
 Requires(preun): systemd
@@ -67,6 +68,7 @@ cp -a *.py providers web requirements.txt %{buildroot}%{appdir}/
     --find-links wheelhouse --target %{buildroot}%{libdir} -r requirements.txt
 rm -rf %{buildroot}%{libdir}/bin
 install -D -m 0755 packaging/plex-source-injection %{buildroot}%{_bindir}/plex-source-injection
+install -D -m 0755 packaging/plex-inject-passwd %{buildroot}%{_bindir}/plex-inject-passwd
 sed -i -e 's|@PYTHON@|%{python_executable}|g' -e 's|@LIBDIR@|%{libdir}|g' \
     %{buildroot}%{_bindir}/plex-source-injection
 install -D -m 0644 packaging/plex-source-injection.service \
@@ -95,6 +97,7 @@ getent passwd plex-source-injection >/dev/null || \
 %doc README.md .env.example
 %{appdir}
 %{_bindir}/plex-source-injection
+%{_bindir}/plex-inject-passwd
 %{_unitdir}/plex-source-injection.service
 %attr(0750,plex-source-injection,plex-source-injection) %dir /var/lib/plex-source-injection
 

@@ -387,7 +387,7 @@ def run() -> None:  # pragma: no cover - entry point
         return
     settings = store.settings()
     if store.password_hash() is None:
-        logger.warning("Admin interface locked: run python main.py --set-admin-password")
+        logger.warning("Admin interface locked: run sudo plex-inject-passwd (RPM) or python main.py --set-admin-password (source checkout)")
     asyncio.run(serve(create_app(settings, store=store), settings.proxy_port, settings.admin_port))
 
 

@@ -3,9 +3,22 @@ set -euo pipefail
 PYTHON="${1:?Python interpreter required}"
 LIBDIR="$(rpm --eval '%{_libdir}')/plex-source-injection/pythonlibs"
 systemd-analyze verify /usr/lib/systemd/system/plex-source-injection.service
+test "$(command -v plex-inject-passwd)" = /usr/bin/plex-inject-passwd
+if /usr/bin/plex-inject-passwd unexpected; then
+    echo "Password helper accepted unexpected arguments" >&2
+    exit 1
+fi
+if runuser -u nobody -- /usr/bin/plex-inject-passwd; then
+    echo "Password helper accepted an unauthorized user" >&2
+    exit 1
+fi
+printf '%s\n' rpm-initial-password-123 rpm-initial-password-123 | /usr/bin/plex-inject-passwd
+test "$(stat -c %U /var/lib/plex-source-injection/config.sqlite3)" = plex-source-injection
+printf '%s\n' rpm-smoke-password-123 rpm-smoke-password-123 | \
+    runuser -u plex-source-injection -- /usr/bin/plex-inject-passwd
 runuser -u plex-source-injection -- env PYTHONPATH="$LIBDIR:/usr/share/plex-source-injection" \
     CONFIG_DB=/var/lib/plex-source-injection/config.sqlite3 \
-    "$PYTHON" -s -c 'import fastapi, uvicorn, plexapi, yt_dlp, spotipy; from config_store import ConfigStore; s=ConfigStore.default(); s.initialize({"ENABLED_PROVIDERS":"","RETENTION_DAYS":"0","DOWNLOAD_DIR":"/var/lib/plex-source-injection/music"}); s.set_password("rpm-smoke-password-123")'
+    "$PYTHON" -s -c 'import fastapi, uvicorn, plexapi, yt_dlp, spotipy; from config_store import ConfigStore; s=ConfigStore.default(); assert s.verify_password("rpm-smoke-password-123"); assert not s.verify_password("rpm-initial-password-123"); s.save({**s.values(), "ENABLED_PROVIDERS":"","RETENTION_DAYS":"0","DOWNLOAD_DIR":"/var/lib/plex-source-injection/music"})'
 runuser -u plex-source-injection -- /usr/bin/plex-source-injection >/tmp/plex-rpm-smoke.log 2>&1 &
 PID=$!
 cleanup() {
