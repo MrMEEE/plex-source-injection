@@ -11,7 +11,8 @@ def test_to_plex_track_schema(settings):
         provider, track("dQw4w9WgXcQ", title="Never", artist="Rick", album="Chan", duration_ms=1000, thumb="t")
     )
     assert item["type"] == "track"
-    assert item["title"] == "Never"
+    assert item["title"] == "[YouTube] Never"
+    assert item["sourceTitle"] == "YouTube"
     assert item["grandparentTitle"] == "Rick"
     assert item["parentTitle"] == "Chan"
     assert item["ratingKey"] == "ext_yt_dQw4w9WgXcQ"
@@ -22,6 +23,28 @@ def test_to_plex_track_schema(settings):
 def test_to_plex_track_album_falls_back_to_provider(settings):
     item = to_plex_track(FakeProvider(settings), track("x"))
     assert item["parentTitle"] == "Fake"
+
+
+def test_source_labels_preserve_metadata_in_every_response_shape(settings):
+    for name, prefix, label in (("youtube", "yt", "YouTube"), ("spotify", "sp", "Spotify")):
+        provider = make_provider_class(name, prefix, label)(settings)
+        original = track("abc", title="Song", artist="Artist", album="Album")
+        item = to_plex_track(provider, original)
+        assert original.title == "Song"
+        assert item["grandparentTitle"] == "Artist"
+        assert item["parentTitle"] == "Album"
+        for shape in ("Hub", "SearchResult", "Metadata"):
+            local = {"ratingKey": "123", "title": "Local song", "type": "track"}
+            content = ([{"type": "track", "Metadata": [local]}] if shape == "Hub"
+                       else [{"Metadata": local}] if shape == "SearchResult" else [local])
+            payload = {"MediaContainer": {shape: content}}
+            inject_results(payload, [item], shape)
+            results = payload["MediaContainer"][shape]
+            injected = (results[0]["Metadata"][-1] if shape == "Hub"
+                        else results[-1]["Metadata"] if shape == "SearchResult" else results[-1])
+            assert injected["title"] == f"[{label}] Song"
+            assert injected["ratingKey"] == f"ext_{prefix}_abc"
+            assert local["title"] == "Local song"
 
 
 def test_search_external_isolates_failing_and_slow_providers(settings):

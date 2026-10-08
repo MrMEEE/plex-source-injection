@@ -125,7 +125,7 @@ def test_hubs_search_injects_external_results(settings, upstream):
     assert [m["ratingKey"] for m in metadata] == ["100", "ext_yt_dQw4w9WgXcQ", "ext_sp_4uLU6hMCjMI75M1A2tKUQC"]
     ext = metadata[1]
     assert ext["key"] == "/library/metadata/ext_yt_dQw4w9WgXcQ"
-    assert (ext["type"], ext["title"], ext["grandparentTitle"]) == ("track", "Never", "Rick")
+    assert (ext["type"], ext["title"], ext["grandparentTitle"]) == ("track", "[YouTube] Never", "Rick")
     assert yt.searches[0][0] == "never" and sp.searches[0][0] == "never"
     assert int(response.headers["content-length"]) == len(response.content)
 

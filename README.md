@@ -28,6 +28,9 @@ traffic. Both listeners share one process and live configuration.
    `PROVIDER_TIMEOUT` is skipped; local and remaining provider results are still returned.
    Results are only injected into successful (2xx) JSON responses, so unauthenticated
    clients never see them. XML responses are passed through unchanged.
+   External result titles are prefixed with the provider name, for example
+   `[YouTube] Song` or `[Spotify] Song`, so Plex clients display their source.
+   Local results, artist/album fields and downloaded track titles are unchanged.
 2. **Ingestion** – when a client requests `/library/metadata/ext_<prefix>_<id>` (or creates
    a play queue whose `uri` references one), the proxy verifies the client's token against
    Plex, dispatches the download to the owning provider (`yt-dlp` / `spotdl`), writes it to

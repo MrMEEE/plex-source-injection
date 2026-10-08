@@ -19,7 +19,7 @@ def to_plex_track(provider: BaseProvider, track: ExternalTrack) -> dict[str, Any
         "key": f"/library/metadata/{rating_key}",
         "guid": f"ext://{provider.name}/{track.item_id}",
         "type": "track",
-        "title": track.title,
+        "title": f"[{provider.display_name}] {track.title}",
         "grandparentTitle": track.artist,
         "parentTitle": track.album or provider.display_name,
         "sourceTitle": provider.display_name,
