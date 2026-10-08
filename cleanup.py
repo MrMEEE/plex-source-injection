@@ -35,6 +35,13 @@ def cleanup_downloads(
         except OSError:
             logger.warning("Could not remove %s", path, exc_info=True)
     if deleted:
+        for folder in sorted({p.parent for p in deleted}, key=lambda p: len(p.parts), reverse=True):
+            while folder != download_dir and folder.is_relative_to(download_dir):
+                try:
+                    folder.rmdir()
+                except OSError:
+                    break
+                folder = folder.parent
         logger.info("Cleanup removed %d file(s) from %s", len(deleted), download_dir)
     return deleted
 

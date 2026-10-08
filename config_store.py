@@ -53,6 +53,8 @@ DEFAULTS = {
     "YTDLP_BINARY": "yt-dlp",
     "FFMPEG_MODE": "external",
     "FFMPEG_BINARY": "ffmpeg",
+    "DENO_MODE": "external",
+    "DENO_BINARY": "deno",
     "DEPENDENCY_DIR": str(Path("dependencies").resolve()),
     "ADMIN_ALLOWED_NETWORKS": DEFAULT_ADMIN_NETWORKS,
 }
@@ -133,6 +135,7 @@ def validate(values: Mapping[str, str]) -> Settings:
         ("SPOTDL_MODE", ("external", "managed", "managed-python")),
         ("YTDLP_MODE", ("bundled", "external", "managed")),
         ("FFMPEG_MODE", ("external", "managed")),
+        ("DENO_MODE", ("external", "managed")),
     ):
         if values.get(key, DEFAULTS[key]) not in modes:
             raise ValueError(f"{key} must be one of {', '.join(modes)}")

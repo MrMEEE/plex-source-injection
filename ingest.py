@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -29,6 +31,36 @@ def title_from_filename(filename: str, item_id: str) -> str | None:
         stem = stem[: -len(marker)]
     title = stem.split(" - ", 1)[-1].strip()
     return title or None
+
+
+_UNSAFE_PATH_CHARS = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]+')
+MAX_FOLDER_NAME_BYTES = 180
+
+
+def item_folder_name(item_id: str, artist: str | None, title: str | None) -> str:
+    """Name of the per-item download folder, ending with the ``[<item_id>]`` marker.
+
+    Each download gets its own folder so Plex's music scanner treats it as a separate
+    album and matches only the new file instead of re-matching the whole download folder.
+    """
+    marker = f"[{item_id}]"
+    parts = (" ".join(_UNSAFE_PATH_CHARS.sub(" ", part or "").split()).strip(" .") for part in (artist, title))
+    label = " - ".join(part for part in parts if part)
+    budget = MAX_FOLDER_NAME_BYTES - len(marker.encode()) - 1
+    label = label.encode()[:max(budget, 0)].decode(errors="ignore").rstrip(" .-")
+    return f"{label} {marker}" if label else marker
+
+
+def find_existing_download(download_dir: Path, item_id: str) -> Path | None:
+    """Find a completed download either in a per-item folder or (legacy) directly in ``download_dir``."""
+    if not download_dir.is_dir():
+        return None
+    marker = f"[{item_id}]"
+    folders = [p for p in download_dir.iterdir() if p.is_dir() and p.name.endswith(marker)]
+    for folder in sorted(folders, key=lambda p: p.stat().st_mtime, reverse=True):
+        if (found := find_downloaded_file(folder, item_id)) is not None:
+            return found
+    return find_downloaded_file(download_dir, item_id)
 
 
 class IngestError(Exception):
@@ -162,6 +194,7 @@ class Ingestor:
         download_dir = self.settings.download_location("music")
 
         title: str | None = None
+        artist: str | None = None
         try:
             metadata = await asyncio.wait_for(
                 provider.fetch_metadata(item_id), timeout=self.settings.provider_timeout
@@ -172,24 +205,35 @@ class Ingestor:
             if metadata is None:
                 raise ItemNotFoundError(f"{provider.display_name} item {item_id} not found")
             title = metadata.title
+            artist = metadata.artist
 
         existing = await asyncio.to_thread(self._lookup, item_id, title)
         if existing:
             logger.info("%s already indexed as ratingKey %s", external_id, existing)
             return existing
 
-        path = find_downloaded_file(download_dir, item_id)
+        path = find_existing_download(download_dir, item_id)
         if path is None:
             logger.info("Downloading %s via %s", external_id, provider.name)
+            item_dir = download_dir / item_folder_name(item_id, artist, title)
+            try:
+                item_dir.mkdir(parents=True, exist_ok=True)
+                item_dir.chmod(0o775)
+            except OSError as exc:
+                raise IngestError(f"Cannot create download folder {item_dir}: {exc}") from exc
             try:
                 path = await asyncio.wait_for(
-                    provider.download(item_id, download_dir),
+                    provider.download(item_id, item_dir),
                     timeout=self.settings.download_timeout,
                 )
             except asyncio.TimeoutError as exc:
                 raise IngestError(f"Download of {external_id} timed out") from exc
             except ProviderError as exc:
                 raise IngestError(str(exc)) from exc
+            finally:
+                with contextlib.suppress(OSError):
+                    if not any(item_dir.iterdir()):
+                        item_dir.rmdir()
         try:
             path.chmod(0o664)
         except OSError as exc:
@@ -197,15 +241,19 @@ class Ingestor:
         logger.info("Downloaded %s to %s", external_id, path)
         title = title or title_from_filename(path.name, item_id)
 
-        await self.trigger_scan()
+        item_folder = path.parent.relative_to(download_dir) if path.parent.is_relative_to(download_dir) else None
+        await self.trigger_scan(item_folder if item_folder and item_folder.parts else None)
         rating_key = await self.wait_for_rating_key(item_id, title)
         logger.info("Registered %s in Plex as ratingKey %s", external_id, rating_key)
         return rating_key
 
-    async def trigger_scan(self) -> None:
-        """Request a partial scan of the download folder in the music section."""
+    async def trigger_scan(self, subfolder: Path | None = None) -> None:
+        """Request a partial scan of the download folder (or one item folder) in the music section."""
         url = f"{self.settings.plex_url}/library/sections/{self.settings.music_section_id}/refresh"
-        params = {"path": self.settings.plex_download_location("music")}
+        scan_path = self.settings.plex_download_location("music")
+        if subfolder is not None:
+            scan_path = scan_path.rstrip("/\\") + "/" + subfolder.as_posix()
+        params = {"path": scan_path}
         headers = {"X-Plex-Token": self.settings.plex_token, "Accept": "application/json"}
         client = self._http or httpx.AsyncClient(timeout=30)
         try:

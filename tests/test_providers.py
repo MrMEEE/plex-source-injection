@@ -541,3 +541,13 @@ def test_managed_spotdl_and_ffmpeg_paths_are_used(tmp_path, monkeypatch):
     asyncio.run(provider.download("4uLU6hMCjMI75M1A2tKUQC", tmp_path))
     assert calls[0][0] == str(root / "spotdl" / "v1" / "spotdl")
     assert calls[0][-3:] == ("--ffmpeg", str(root / "ffmpeg" / "v1" / "ffmpeg"), "--lyrics")
+
+
+def test_providers_pass_optional_deno_runtime(monkeypatch):
+    monkeypatch.setattr("dependencies.shutil.which", lambda name: "/opt/deno/deno" if name == "deno" else None)
+    youtube = YouTubeProvider(Settings())
+    spotify = SpotifyProvider(Settings.from_env({"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret"}))
+    assert youtube.deno_path == spotify.deno_path == "/opt/deno/deno"
+    assert youtube._ytdlp_options(skip_download=True)["js_runtimes"] == {"deno": {"path": "/opt/deno/deno"}}
+    monkeypatch.setattr("dependencies.shutil.which", lambda name: None)
+    assert "js_runtimes" not in YouTubeProvider(Settings())._ytdlp_options()

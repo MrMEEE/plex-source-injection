@@ -320,7 +320,7 @@ function addCategories(page, provider) {
 }
 function addDependencyPage(tool) {
   const page = addPage(`tool/${tool.name}`, tool.name, "Choose an existing executable or install a checksum-verified upstream release.", "T");
-  const settings = panel("Dependency source", "Managed installs are explicit. Switching source requires saving. FFmpeg settings are shared by both built-in plugins.");
+  const settings = panel("Dependency source", "Managed installs are explicit. Switching source requires saving. FFmpeg and Deno settings are shared by both built-in plugins.");
   addField(settings.body, {key: tool.mode_key, label: "Installation source", kind: "select", choices: tool.modes, default: tool.modes[0], description: "External uses your binary. Managed downloads a standalone binary. Managed-python installs spotdl from PyPI into a private virtual environment (recommended on EL9). Bundled uses the installed Python package."});
   addField(settings.body, {key: tool.binary_key, label: "External executable", default: tool.name, description: "Executable name on PATH or absolute file path. Used only in external mode."});
   page.append(settings.container);
@@ -377,6 +377,7 @@ function addDependencyPage(tool) {
   downloads.body.append(body);
   page.append(downloads.container);
   if (tool.name === "ffmpeg") tokenGuide(page, "FFmpeg builds", "Managed FFmpeg currently supports Linux x86-64 and ARM64 using yt-dlp's GPL builds, not binaries published by ffmpeg.org. Other systems must provide ffmpeg and ffprobe themselves.", [["https://ffmpeg.org/download.html", "FFmpeg download guidance"], ["https://github.com/yt-dlp/FFmpeg-Builds", "Build source & licenses"]]);
+  if (tool.name === "deno") tokenGuide(page, "Why Deno?", "Optional but recommended. YouTube protects many videos with JavaScript challenges that yt-dlp (also used inside spotdl) solves with Deno. Without it, some downloads fail with \"Some YouTube downloads require Deno\". Choose Managed and install it here, or install Deno system-wide and keep External. If no Deno is found, downloads run without it.", [["https://docs.deno.com/runtime/getting_started/installation/", "Deno installation guide"], ["https://github.com/yt-dlp/yt-dlp/wiki/EJS", "yt-dlp JavaScript runtime notes"]]);
   refresh();
 }
 function addPlexLogin(parent) {

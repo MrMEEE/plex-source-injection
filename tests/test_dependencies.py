@@ -3,17 +3,20 @@ import hashlib
 import io
 import json
 import tarfile
+import zipfile
 from pathlib import Path
 
 import httpx
 import pytest
 
 from config import Settings
-from dependencies import DependencyError, DependencyManager, ffmpeg_location, installed, resolve_tool, tool_environment
+from dependencies import (
+    DependencyError, DependencyManager, deno_location, ffmpeg_location, installed, resolve_tool, tool_environment,
+)
 
 
 def release(name, payload, version="v1.2.3", digest=None):
-    repository = {"spotdl": "spotDL/spotify-downloader", "yt-dlp": "yt-dlp/yt-dlp", "ffmpeg": "yt-dlp/FFmpeg-Builds"}[name]
+    repository = {"spotdl": "spotDL/spotify-downloader", "yt-dlp": "yt-dlp/yt-dlp", "ffmpeg": "yt-dlp/FFmpeg-Builds", "deno": "denoland/deno"}[name]
     asset = DependencyManager().asset_name(name, version)
     return {
         "tag_name": version, "draft": False, "prerelease": False,
@@ -244,3 +247,46 @@ def test_python_spotdl_lists_stable_pypi_wheels():
     settings = Settings.from_env({"SPOTDL_MODE": "managed-python"})
     releases = asyncio.run(manager.releases("spotdl", settings))
     assert [release["version"] for release in releases] == ["4.10.0", "4.5.2"]
+
+
+def test_managed_deno_install_extracts_verified_zip(tmp_path, linux):
+    executable = b"#!/bin/sh\necho deno 2.9.7\n"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as bundle:
+        bundle.writestr("deno", executable)
+        bundle.writestr("../outside", b"bad")
+    payload = buffer.getvalue()
+    latest = release("deno", payload, "v2.9.7")
+    assert latest["assets"][0]["name"] == "deno-x86_64-unknown-linux-gnu.zip"
+
+    def upstream(request):
+        if request.url.host == "api.github.com":
+            return httpx.Response(200, json=latest)
+        return httpx.Response(200, content=payload)
+
+    settings = Settings.from_env({"DEPENDENCY_DIR": str(tmp_path), "DENO_MODE": "managed"})
+    assert deno_location(settings) is None
+    info = asyncio.run(DependencyManager(httpx.MockTransport(upstream)).install(settings, "deno", "latest"))
+    assert Path(info["binary"]).read_bytes() == executable
+    assert info["reported_version"] == "deno 2.9.7"
+    assert deno_location(settings) == info["binary"]
+    assert not (tmp_path / "outside").exists()
+    assert sorted(p.name for p in Path(info["binary"]).parent.iterdir()) == ["deno"]
+
+
+def test_deno_archive_without_executable_is_rejected(tmp_path):
+    archive = tmp_path / "deno.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("bin/deno", b"x")
+    with pytest.raises(DependencyError, match="unique safe deno"):
+        DependencyManager.extract_deno(archive, tmp_path, "deno")
+
+
+def test_deno_is_optional_and_added_to_tool_path(monkeypatch):
+    monkeypatch.setattr("dependencies.shutil.which", lambda name: None)
+    assert deno_location(Settings()) is None
+    monkeypatch.setattr("dependencies.shutil.which", lambda name: "/opt/deno/bin/deno")
+    assert deno_location(Settings()) == "/opt/deno/bin/deno"
+    monkeypatch.setenv("PATH", "/usr/bin")
+    assert tool_environment("/opt/deno/bin/deno")["PATH"].split(":")[0] == "/opt/deno/bin"
+    assert tool_environment()["PATH"] == "/usr/bin"

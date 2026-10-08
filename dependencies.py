@@ -12,6 +12,7 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,12 +39,31 @@ TOOLS = {
     "spotdl": Tool("spotdl", "spotDL/spotify-downloader", "SPOTDL_MODE", "SPOTDL_BINARY", "spotdl", ("external", "managed", "managed-python")),
     "yt-dlp": Tool("yt-dlp", "yt-dlp/yt-dlp", "YTDLP_MODE", "YTDLP_BINARY", "yt-dlp", ("bundled", "external", "managed")),
     "ffmpeg": Tool("ffmpeg", "yt-dlp/FFmpeg-Builds", "FFMPEG_MODE", "FFMPEG_BINARY", "ffmpeg"),
+    "deno": Tool("deno", "denoland/deno", "DENO_MODE", "DENO_BINARY", "deno"),
 }
 TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,100}$")
+DENO_TARGETS = {
+    "Linux": {"x86_64": "x86_64-unknown-linux-gnu", "amd64": "x86_64-unknown-linux-gnu",
+              "aarch64": "aarch64-unknown-linux-gnu", "arm64": "aarch64-unknown-linux-gnu"},
+    "Darwin": {"x86_64": "x86_64-apple-darwin", "arm64": "aarch64-apple-darwin", "aarch64": "aarch64-apple-darwin"},
+    "Windows": {"amd64": "x86_64-pc-windows-msvc", "x86_64": "x86_64-pc-windows-msvc"},
+}
 
 
-def tool_environment() -> dict[str, str]:
-    return {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
+def tool_environment(deno: str | None = None) -> dict[str, str]:
+    """Environment for external tools; ``deno`` is put first on PATH so yt-dlp/spotdl find it."""
+    env = {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
+    if deno:
+        env["PATH"] = os.pathsep.join(filter(None, (str(Path(deno).parent), env.get("PATH"))))
+    return env
+
+
+def deno_location(settings: Settings) -> str | None:
+    """Deno is optional: return its path, or None when it is not installed/found."""
+    try:
+        return resolve_tool(settings, "deno")
+    except DependencyError:
+        return None
 
 
 def tool_root(settings: Settings, name: str) -> Path:
@@ -123,6 +143,8 @@ class DependencyManager:
             suffix = {"x86_64": "linux64", "amd64": "linux64", "aarch64": "linuxarm64", "arm64": "linuxarm64"}.get(machine)
             if suffix:
                 return f"ffmpeg-master-latest-{suffix}-gpl.tar.xz"
+        elif name == "deno" and (target := DENO_TARGETS.get(system, {}).get(machine)):
+            return f"deno-{target}.zip"
         raise DependencyError(f"Managed {name} is not available for {system}/{machine}; use an external binary.")
 
     async def releases(self, name: str, settings: Settings | None = None) -> list[dict[str, str]]:
@@ -202,6 +224,11 @@ class DependencyManager:
                         await asyncio.to_thread(self.extract_ffmpeg, archive, staging)
                     except tarfile.TarError as exc:
                         raise DependencyError("Invalid FFmpeg archive") from exc
+                elif name == "deno":
+                    try:
+                        await asyncio.to_thread(self.extract_deno, archive, staging, executable)
+                    except zipfile.BadZipFile as exc:
+                        raise DependencyError("Invalid Deno archive") from exc
                 else:
                     archive.rename(staging / executable)
                 (staging / executable).chmod(0o700)
@@ -342,4 +369,14 @@ class DependencyManager:
                 with source, (staging / binary).open("wb") as output:
                     shutil.copyfileobj(source, output)
                 (staging / binary).chmod(0o700)
+        archive.unlink()
+
+    @staticmethod
+    def extract_deno(archive: Path, staging: Path, executable: str) -> None:
+        with zipfile.ZipFile(archive) as bundle:
+            members = [m for m in bundle.infolist() if m.filename == executable and not m.is_dir()]
+            if len(members) != 1 or members[0].file_size > 512 * 1024 * 1024:
+                raise DependencyError("Deno archive has no unique safe deno executable")
+            with bundle.open(members[0]) as source, (staging / executable).open("wb") as output:
+                shutil.copyfileobj(source, output)
         archive.unlink()

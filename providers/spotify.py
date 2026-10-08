@@ -14,7 +14,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from dependencies import DependencyError, ffmpeg_location, resolve_tool, tool_environment
+from dependencies import DependencyError, deno_location, ffmpeg_location, resolve_tool, tool_environment
 from .base import (
     BaseProvider,
     ExternalTrack,
@@ -40,7 +40,7 @@ class SpotifyProvider(BaseProvider):
     prefix = "sp"
     display_name = "Spotify"
     description = "Search Spotify with your app credentials and download audio with spotdl."
-    dependencies = ("spotdl", "ffmpeg")
+    dependencies = ("spotdl", "ffmpeg", "deno")
     config_fields = (
         ProviderSetting("SPOTIFY_CLIENT_ID", "Client ID", "Required. From your Spotify developer application."),
         ProviderSetting("SPOTIFY_CLIENT_SECRET", "Client secret", "Required. From your Spotify developer application."),
@@ -75,6 +75,8 @@ class SpotifyProvider(BaseProvider):
         except DependencyError as exc:
             self.dependency_error = str(exc)
             self.ffmpeg_path = None
+        # Optional: spotdl's yt-dlp needs a JavaScript runtime for some YouTube downloads.
+        self.deno_path = deno_location(settings)
         self.provider_credentials = (settings.get("SPOTDL_PROVIDER_CREDENTIALS", "true") or "").lower() in (
             "1",
             "true",
@@ -188,7 +190,7 @@ class SpotifyProvider(BaseProvider):
         args = [self.ytdlp_binary, "--ignore-config", "--no-warnings", "--flat-playlist", "--print", "id", query]
         try:
             process = await asyncio.create_subprocess_exec(
-                *args, env=tool_environment(),
+                *args, env=tool_environment(self.deno_path),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
         except OSError as exc:
@@ -207,13 +209,14 @@ class SpotifyProvider(BaseProvider):
             None,
         )
 
-    @staticmethod
-    def _youtube_search_module(query: str) -> str | None:
+    def _youtube_search_module(self, query: str) -> str | None:
         try:
             import yt_dlp
         except ImportError as exc:
             raise ProviderError("yt-dlp is not installed for Spotify source checks") from exc
-        opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist", "skip_download": True}
+        opts: dict[str, Any] = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist", "skip_download": True}
+        if self.deno_path:
+            opts["js_runtimes"] = {"deno": {"path": self.deno_path}}
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(query, download=False)
@@ -292,7 +295,7 @@ class SpotifyProvider(BaseProvider):
         spotdl only reads ``~/.config/spotdl/config.json``, so HOME points at a 0700 temporary
         directory. The real cache directory is kept so yt-dlp's caches survive between runs.
         """
-        env = tool_environment()
+        env = tool_environment(self.deno_path)
         real_home = env.get("HOME") or str(Path.home())
         env.setdefault("XDG_CACHE_HOME", str(Path(real_home) / ".cache"))
         env["HOME"] = str(home)
@@ -350,7 +353,7 @@ class SpotifyProvider(BaseProvider):
                 args += ["--ffmpeg", self.ffmpeg_path]
             # An empty provider list skips lyrics lookups, which add seconds and mostly fail.
             args.append("--lyrics")
-            env = self._private_config_env(Path(home)) if self.provider_credentials else tool_environment()
+            env = self._private_config_env(Path(home)) if self.provider_credentials else tool_environment(self.deno_path)
             process = await asyncio.create_subprocess_exec(
                 *args, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
             )

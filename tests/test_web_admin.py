@@ -310,7 +310,7 @@ def test_categories_validate_persist_and_default_port_preserves_existing_databas
     youtube = next(provider for provider in data["providers"] if provider["name"] == "youtube")
     assert youtube["supported_categories"] == ["music"]
     assert youtube["selected_categories"] == "music"
-    assert youtube["dependencies"] == ["yt-dlp", "ffmpeg"]
+    assert youtube["dependencies"] == ["yt-dlp", "ffmpeg", "deno"]
     assert data["values"]["PROXY_PORT"] == "32399"
     assert update(client, {"YOUTUBE_CATEGORIES": "series"}).status_code == 422
     assert update(client, {"YOUTUBE_CATEGORIES": ""}).status_code == 200

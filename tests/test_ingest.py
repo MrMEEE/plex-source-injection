@@ -4,8 +4,8 @@ import stat
 import httpx
 import pytest
 
-from ingest import IngestError, Ingestor, ItemNotFoundError
-from providers import ProviderRegistry
+from ingest import IngestError, Ingestor, ItemNotFoundError, item_folder_name
+from providers import ProviderError, ProviderRegistry
 from tests.conftest import FakeProvider, track
 
 
@@ -42,12 +42,14 @@ def test_download_and_register_downloads_scans_and_polls(settings):
 
     assert asyncio.run(run()) == ["4242"] * 3
     assert provider.downloads == ["abc_1"]
-    assert (settings.download_dir / "Artist - Title [abc_1].mp3").exists()
-    assert stat.S_IMODE((settings.download_dir / "Artist - Title [abc_1].mp3").stat().st_mode) == 0o664
+    item_dir = settings.download_dir / "Artist - Song [abc_1]"
+    assert (item_dir / "Artist - Title [abc_1].mp3").exists()
+    assert stat.S_IMODE((item_dir / "Artist - Title [abc_1].mp3").stat().st_mode) == 0o664
+    assert stat.S_IMODE(item_dir.stat().st_mode) == 0o775
     assert len(scans) == 1
     scan = scans[0]
     assert scan.url.path == "/library/sections/3/refresh"
-    assert scan.url.params["path"] == "/music/Downloads"
+    assert scan.url.params["path"] == "/music/Downloads/Artist - Song [abc_1]"
     assert scan.headers["X-Plex-Token"] == "server-token"
     assert lookup.calls[-1] == ("abc_1", "Song")
 
@@ -83,6 +85,46 @@ def test_existing_download_permissions_are_repaired_before_scan(settings):
     assert provider.downloads == []
 
 
+def test_existing_download_in_item_folder_is_reused_and_folder_scanned(settings):
+    folder = settings.download_dir / "Other Name [abc]"
+    folder.mkdir(parents=True)
+    (folder / "Artist - Title [abc].mp3").write_bytes(b"audio")
+    provider = FakeProvider(settings, tracks=[track("abc")])
+    lookup, scans = FakeLookup(), []
+    ingestor = make_ingestor(settings, provider, lookup, scans)
+    assert asyncio.run(ingestor.download_and_register("ext_fk_abc")) == "4242"
+    assert provider.downloads == []
+    assert scans[0].url.params["path"] == "/music/Downloads/Other Name [abc]"
+
+
+def test_failed_download_removes_empty_item_folder(settings):
+    class FailingProvider(FakeProvider):
+        async def download(self, item_id, output_dir):
+            raise ProviderError("boom")
+
+    provider = FailingProvider(settings, tracks=[track("abc")])
+    ingestor = make_ingestor(settings, provider, FakeLookup(), [])
+    with pytest.raises(IngestError, match="boom"):
+        asyncio.run(ingestor.download_and_register("ext_fk_abc"))
+    assert list(settings.download_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize(("artist", "title", "expected"), [
+    ("AC/DC", "Back: In *Black*?", "AC DC - Back In Black [id1]"),
+    ("", None, "[id1]"),
+    ("  ..", "\x00", "[id1]"),
+    (None, "Song.", "Song [id1]"),
+])
+def test_item_folder_name_is_safe(artist, title, expected):
+    assert item_folder_name("id1", artist, title) == expected
+
+
+def test_item_folder_name_is_length_limited():
+    name = item_folder_name("id1", "æ" * 300, "x")
+    assert name.endswith(" [id1]") and len(name.encode()) <= 180
+    name.encode().decode()
+
+
 def test_media_permission_failure_prevents_scan(settings, monkeypatch):
     from pathlib import Path
     provider = FakeProvider(settings, tracks=[track("abc")])
@@ -90,7 +132,8 @@ def test_media_permission_failure_prevents_scan(settings, monkeypatch):
     ingestor = make_ingestor(settings, provider, FakeLookup(), scans)
 
     def denied(path, mode):
-        raise PermissionError("permission denied")
+        if path.is_file():
+            raise PermissionError("permission denied")
 
     monkeypatch.setattr(Path, "chmod", denied)
     with pytest.raises(IngestError, match="Cannot set media permissions to 0664"):

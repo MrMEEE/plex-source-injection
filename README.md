@@ -39,16 +39,19 @@ traffic. Both listeners share one process and live configuration.
    still need a sufficient request timeout for downloading and indexing; a completed
    download cannot deliver playback to a client that has already abandoned its request.
    The proxy dispatches the download to the owning provider (`yt-dlp` / `spotdl`), writes it to
-   `DOWNLOAD_DIR` as `Artist - Title [<id>].<ext>`, triggers
-   `GET /library/sections/<MUSIC_SECTION_ID>/refresh?path=<PLEX_DOWNLOAD_DIR>`, polls Plex
+   its own folder `DOWNLOAD_DIR/Artist - Title [<id>]/`, triggers
+   `GET /library/sections/<MUSIC_SECTION_ID>/refresh?path=<PLEX_DOWNLOAD_DIR>/Artist - Title [<id>]`
+   so Plex only scans and matches the new item (a single shared folder makes Plex re-match
+   every earlier download as one album, which is slow and can mis-match tracks), polls Plex
    (via `python-plexapi`) until the file has a real ratingKey, and then returns Plex's own
    metadata for that ratingKey so the client plays the file natively. Concurrent requests
    for the same item share one download.
 3. **Pass-through** – all other requests (including media streams and `Range` requests) are
    streamed to Plex with their `X-Plex-*` headers and query strings untouched.
 4. **Cleanup** – every `CLEANUP_INTERVAL_HOURS` (default 24) files in `DOWNLOAD_DIR` older
-   than `RETENTION_DAYS` are deleted and the folder is rescanned. `RETENTION_DAYS=0`
-   disables cleanup.
+   than `RETENTION_DAYS` are deleted, emptied item folders are removed and the folder is
+   rescanned. `RETENTION_DAYS=0` disables cleanup. Files from older versions stored directly
+   in `DOWNLOAD_DIR` are still found and reused.
 
 ## Installation
 
@@ -318,6 +321,11 @@ Plugin pages link to their dependencies. Each dependency page lets you choose it
   [yt-dlp/FFmpeg-Builds](https://github.com/yt-dlp/FFmpeg-Builds), not by ffmpeg.org.
   The managed install includes both ffmpeg and ffprobe. On other operating systems,
   provide them yourself; keep both in the same directory.
+* **Deno:** optional JavaScript runtime used by yt-dlp (also inside spotdl) to solve
+  YouTube's JS challenges. Without it some YouTube downloads fail with
+  "Some YouTube downloads require Deno". Choose an external `deno` executable or a managed
+  official [denoland/deno](https://github.com/denoland/deno) release (Linux x86-64/ARM64,
+  macOS, Windows x86-64). When Deno is not found the plugins continue without it.
 
 Click **Check for updates**, choose a stable version, then **Install / update** and confirm.
 Downloads are restricted to the configured upstream GitHub repositories, size-limited
@@ -541,6 +549,7 @@ is retained as an optional first-run import template, not an ongoing configurati
 | `SPOTDL_MODE` / `SPOTDL_BINARY` | `external` / `spotdl` | Managed release or your own executable |
 | `YTDLP_MODE` / `YTDLP_BINARY` | `bundled` / `yt-dlp` | Bundled Python package, managed release, or external CLI |
 | `FFMPEG_MODE` / `FFMPEG_BINARY` | `external` / `ffmpeg` | Shared FFmpeg source; ffprobe must be alongside an external binary |
+| `DENO_MODE` / `DENO_BINARY` | `external` / `deno` | Optional JavaScript runtime for YouTube challenges; managed release or your own executable |
 | `DEPENDENCY_DIR` | `dependencies/` beside SQLite; RPM: `/var/lib/plex-source-injection/bin` | Absolute path for managed version files; fixed for standard RPM installs |
 
 ## Adding a provider

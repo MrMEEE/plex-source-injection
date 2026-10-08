@@ -20,6 +20,19 @@ def test_cleanup_removes_only_old_files(tmp_path):
 
     assert sorted(deleted) == sorted([old, nested])
     assert new.exists() and not old.exists() and not nested.exists()
+    assert not nested.parent.exists() and tmp_path.exists()
+
+
+def test_cleanup_keeps_folders_with_remaining_files(tmp_path):
+    now = time.time()
+    folder = tmp_path / "Artist - Song [a]"
+    folder.mkdir()
+    old, keep = folder / "old [a].mp3", folder / "cover.jpg"
+    old.write_bytes(b"x")
+    keep.write_bytes(b"x")
+    os.utime(old, (0, 0))
+    assert cleanup_downloads(tmp_path, retention_days=30, now=now) == [old]
+    assert keep.exists()
 
 
 def test_cleanup_disabled_or_missing_dir(tmp_path):

@@ -13,7 +13,7 @@ import httpx
 
 from .base import BaseProvider, ExternalTrack, ProviderError, ProviderSetting, find_downloaded_file
 from .registry import register_provider
-from dependencies import DependencyError, ffmpeg_location, resolve_tool
+from dependencies import DependencyError, deno_location, ffmpeg_location, resolve_tool, tool_environment
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class YouTubeProvider(BaseProvider):
     prefix = "yt"
     display_name = "YouTube"
     description = "Search YouTube and download audio with yt-dlp. An API key is optional."
-    dependencies = ("yt-dlp", "ffmpeg")
+    dependencies = ("yt-dlp", "ffmpeg", "deno")
     config_fields = (
         ProviderSetting(
             "YOUTUBE_API_KEY", "YouTube API key",
@@ -61,6 +61,8 @@ class YouTubeProvider(BaseProvider):
         except DependencyError as exc:
             self.dependency_error = str(exc)
             self.ffmpeg_path = None
+        # Optional: YouTube's JavaScript challenges need a runtime for some videos.
+        self.deno_path = deno_location(settings)
 
     # -- search -------------------------------------------------------------
     async def search(self, query: str, limit: int) -> list[ExternalTrack]:
@@ -81,6 +83,7 @@ class YouTubeProvider(BaseProvider):
             raise ProviderError("No yt-dlp executable configured")
         process = await asyncio.create_subprocess_exec(
             self.binary, "--ignore-config", "--no-warnings", *args,
+            env=tool_environment(self.deno_path),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:
@@ -157,10 +160,16 @@ class YouTubeProvider(BaseProvider):
             url=WATCH_URL.format(id=video_id),
         )
 
+    def _ytdlp_options(self, **options: Any) -> dict[str, Any]:
+        options = {"quiet": True, "no_warnings": True, **options}
+        if self.deno_path:
+            options["js_runtimes"] = {"deno": {"path": self.deno_path}}
+        return options
+
     def _search_ytdlp(self, query: str, limit: int) -> list[ExternalTrack]:
         import yt_dlp
 
-        opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist", "skip_download": True}
+        opts = self._ytdlp_options(extract_flat="in_playlist", skip_download=True)
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(f"ytsearch{max(limit, 1)}:{query}", download=False)
         entries = (info or {}).get("entries") or []
@@ -179,7 +188,7 @@ class YouTubeProvider(BaseProvider):
     def _fetch_metadata_sync(self, item_id: str) -> ExternalTrack | None:
         import yt_dlp
 
-        opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True}
+        opts = self._ytdlp_options(skip_download=True, noplaylist=True)
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(WATCH_URL.format(id=item_id), download=False)
@@ -210,17 +219,15 @@ class YouTubeProvider(BaseProvider):
     def _download_sync(self, item_id: str, output_dir: Path) -> None:
         import yt_dlp
 
-        opts = {
-            "format": "bestaudio/best",
-            "outtmpl": str(output_dir / OUTPUT_TEMPLATE),
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "postprocessors": [
+        opts = self._ytdlp_options(
+            format="bestaudio/best",
+            outtmpl=str(output_dir / OUTPUT_TEMPLATE),
+            noplaylist=True,
+            postprocessors=[
                 {"key": "FFmpegExtractAudio", "preferredcodec": self.settings.audio_format},
                 {"key": "FFmpegMetadata", "add_metadata": True},
             ],
-        }
+        )
         if self.ffmpeg_path:
             opts["ffmpeg_location"] = self.ffmpeg_path
         try:
