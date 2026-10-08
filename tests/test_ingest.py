@@ -1,4 +1,5 @@
 import asyncio
+import stat
 
 import httpx
 import pytest
@@ -42,6 +43,7 @@ def test_download_and_register_downloads_scans_and_polls(settings):
     assert asyncio.run(run()) == ["4242"] * 3
     assert provider.downloads == ["abc_1"]
     assert (settings.download_dir / "Artist - Title [abc_1].mp3").exists()
+    assert stat.S_IMODE((settings.download_dir / "Artist - Title [abc_1].mp3").stat().st_mode) == 0o664
     assert len(scans) == 1
     scan = scans[0]
     assert scan.url.path == "/library/sections/3/refresh"
@@ -60,6 +62,40 @@ def test_already_indexed_item_is_not_downloaded(settings):
     ingestor = make_ingestor(settings, provider, lookup, scans)
     assert asyncio.run(ingestor.download_and_register("ext_fk_abc")) == "4242"
     assert provider.downloads == [] and scans == []
+
+
+def test_existing_download_permissions_are_repaired_before_scan(settings):
+    path = settings.download_dir / "Artist - Title [abc].mp3"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"audio")
+    path.chmod(0o600)
+    lookup = FakeLookup()
+    provider = FakeProvider(settings, tracks=[track("abc")])
+
+    def handler(request):
+        assert stat.S_IMODE(path.stat().st_mode) == 0o664
+        lookup.indexed = True
+        return httpx.Response(200)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    ingestor = Ingestor(settings, ProviderRegistry([provider]), http_client=client, plex_lookup=lookup)
+    assert asyncio.run(ingestor.download_and_register("ext_fk_abc")) == "4242"
+    assert provider.downloads == []
+
+
+def test_media_permission_failure_prevents_scan(settings, monkeypatch):
+    from pathlib import Path
+    provider = FakeProvider(settings, tracks=[track("abc")])
+    scans = []
+    ingestor = make_ingestor(settings, provider, FakeLookup(), scans)
+
+    def denied(path, mode):
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(Path, "chmod", denied)
+    with pytest.raises(IngestError, match="Cannot set media permissions to 0664"):
+        asyncio.run(ingestor.download_and_register("ext_fk_abc"))
+    assert not scans
 
 
 def test_unknown_item_raises_not_found(settings):

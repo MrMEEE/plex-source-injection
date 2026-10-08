@@ -173,6 +173,26 @@ def test_spotdl_credentials_only_passed_when_opted_in(tmp_path, monkeypatch, opt
     assert "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC" in captured["args"]
 
 
+def test_spotdl_no_file_reports_downloader_output(tmp_path, monkeypatch):
+    import asyncio
+    import providers.spotify as spotify
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return b"Skipping song: no matching audio source found", None
+
+    async def fake_exec(*args, **kwargs):
+        return Process()
+
+    monkeypatch.setattr(spotify.shutil, "which", lambda name: "/usr/bin/spotdl")
+    monkeypatch.setattr(spotify.asyncio, "create_subprocess_exec", fake_exec)
+    settings = Settings.from_env({"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret"})
+    with pytest.raises(spotify.ProviderError, match="Skipping song: no matching audio source found"):
+        asyncio.run(SpotifyProvider(settings).download("4uLU6hMCjMI75M1A2tKUQC", tmp_path))
+
+
 def test_youtube_external_cli_search_metadata_download(tmp_path, monkeypatch):
     import asyncio
     import json

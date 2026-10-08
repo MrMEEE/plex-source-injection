@@ -162,5 +162,6 @@ class SpotifyProvider(BaseProvider):
             raise ProviderError(f"spotdl exited with {process.returncode}: {tail}")
         path = find_downloaded_file(output_dir, item_id)
         if path is None:
-            raise ProviderError(f"spotdl finished but no file found for {item_id}")
+            tail = output.decode(errors="replace")[-2000:].strip() if output else "No output from spotdl"
+            raise ProviderError(f"spotdl finished but no file found for {item_id}. spotdl output: {tail}")
         return path

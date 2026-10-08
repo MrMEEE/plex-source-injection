@@ -137,8 +137,11 @@ sudo -u plex-source-injection test -w /home/mj/Musik/Download
 
 Create the download directory first and adapt these paths to your installation.
 Existing media subdirectories also need suitable permissions for writing and cleanup.
-`UMask=0077` keeps newly created files private unless directory default ACLs grant
-access; configure appropriate access/default ACLs for Plex if it uses another account.
+`UMask=0077` keeps service state private. Completed media files are explicitly set
+to `0664` before scanning, including existing downloads reused on retry, so a separate
+Plex account can read them. Parent directories must still allow Plex to traverse them;
+configure appropriate directory permissions or ACLs. Other members of the media file's
+group can write it; other users can read it.
 `ProtectSystem=full` makes `/usr`, `/boot` and `/etc` read-only, not `/home`, so it can
 remain enabled. `PrivateTmp` and `NoNewPrivileges` can also remain enabled.
 On SELinux-enforcing hosts, check audit denials if ordinary permissions are correct;

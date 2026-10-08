@@ -190,6 +190,10 @@ class Ingestor:
                 raise IngestError(f"Download of {external_id} timed out") from exc
             except ProviderError as exc:
                 raise IngestError(str(exc)) from exc
+        try:
+            path.chmod(0o664)
+        except OSError as exc:
+            raise IngestError(f"Cannot set media permissions to 0664 for {path}: {exc}") from exc
         logger.info("Downloaded %s to %s", external_id, path)
         title = title or title_from_filename(path.name, item_id)
 
