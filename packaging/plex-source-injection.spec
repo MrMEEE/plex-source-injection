@@ -18,7 +18,7 @@
 %global debug_package %{nil}
 
 Name:           plex-source-injection
-Version:        0.0.9
+Version:        0.0.10
 Release:        1%{?dist}
 Summary:        On-demand music search and ingestion proxy for Plex
 License:        GPL-3.0-only
@@ -108,6 +108,9 @@ getent passwd plex-source-injection >/dev/null || \
 %{_libdir}/plex-source-injection
 
 %changelog
+* Thu Oct 08 2026 Martin Juhl <m@rtinjuhl.dk> - 0.0.10-1
+- Release 0.0.10
+
 * Thu Oct 08 2026 Martin Juhl <m@rtinjuhl.dk> - 0.0.9-1
 - Release 0.0.9
 
