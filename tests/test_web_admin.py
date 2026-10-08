@@ -108,7 +108,7 @@ def test_custom_plugins_expose_their_own_fields_and_legacy_plugins_still_work(ad
     register_provider(legacy)
     try:
         assert update(client, {
-            "CUSTOMUITEST_TOKEN": "hidden", "CUSTOMUITEST_MODE": "albums",
+            "CUSTOMUITEST_TOKEN": "custom-secret-value-123", "CUSTOMUITEST_MODE": "albums",
             "LEGACYUITEST_TOKEN": "legacy-hidden",
         }).status_code == 200
         data = config(client)
@@ -122,7 +122,8 @@ def test_custom_plugins_expose_their_own_fields_and_legacy_plugins_still_work(ad
         assert data["values"]["CUSTOMUITEST_MODE"] == "albums"
         assert data["values"]["CUSTOMUITEST_TOKEN"] == ""
         assert data["values"]["LEGACYUITEST_TOKEN"] == ""
-        assert "hidden" not in str(data)
+        assert "custom-secret-value-123" not in str(data)
+        assert "legacy-hidden" not in str(data)
     finally:
         unregister_provider(custom.name)
         unregister_provider(legacy.name)

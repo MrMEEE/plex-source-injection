@@ -6,8 +6,11 @@ import asyncio
 import logging
 import re
 import shutil
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from dependencies import DependencyError, ffmpeg_location, resolve_tool, tool_environment
 from .base import (
@@ -39,6 +42,11 @@ class SpotifyProvider(BaseProvider):
         ProviderSetting("SPOTIFY_CLIENT_SECRET", "Client secret", "Required. From your Spotify developer application."),
         ProviderSetting("SPOTDL_BINARY", "spotdl executable", "Executable name or absolute path.", default="spotdl"),
         ProviderSetting(
+            "SPOTIFY_CHECK_AVAILABILITY", "Hide unconfirmed audio sources",
+            "Check audio matches with spotdl before showing Spotify results. Slow or failed checks are hidden; results are cached briefly.",
+            kind="switch", default="true",
+        ),
+        ProviderSetting(
             "SPOTDL_PASS_CREDENTIALS", "Pass credentials to spotdl",
             "Exposes Spotify credentials in the process list. Off uses spotdl's own config.json.",
             kind="switch", default="false",
@@ -69,6 +77,9 @@ class SpotifyProvider(BaseProvider):
             "yes",
         )
         self._client: Any = None
+        self.check_availability = settings.get("SPOTIFY_CHECK_AVAILABILITY", "true").lower() in ("true", "1", "yes")
+        self._availability: OrderedDict[str, tuple[float, bool]] = OrderedDict()
+        self._availability_slots = asyncio.Semaphore(3)
 
     def _spotify(self) -> Any:
         if self._client is None:
@@ -103,12 +114,84 @@ class SpotifyProvider(BaseProvider):
         )
 
     async def search(self, query: str, limit: int) -> list[ExternalTrack]:
+        deadline = time.monotonic() + self.settings.provider_timeout * 0.9
         def _search() -> list[ExternalTrack]:
             result = self._spotify().search(q=query, type="track", limit=min(max(limit, 1), 50))
             items = ((result or {}).get("tracks") or {}).get("items") or []
             return [t for t in (self._to_track(i) for i in items if i) if t]
 
-        return await asyncio.to_thread(_search)
+        tracks = await asyncio.to_thread(_search)
+        if not self.check_availability:
+            return tracks
+
+        async def check(track: ExternalTrack) -> bool:
+            cached = self._availability.get(track.item_id)
+            if cached and cached[0] > time.monotonic():
+                self._availability.move_to_end(track.item_id)
+                return cached[1]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning("Spotify source check budget exhausted for %s; hiding result", track.item_id)
+                return False
+            try:
+                async with asyncio.timeout(remaining):
+                    async with self._availability_slots:
+                        available = await self._source_available(track.item_id)
+            except TimeoutError:
+                logger.warning("Spotify source check timed out for %s; hiding result", track.item_id)
+                return False
+            except ProviderError as exc:
+                logger.warning("Spotify source check failed for %s; hiding result: %s", track.item_id, exc)
+                return False
+            self._availability[track.item_id] = (time.monotonic() + (300 if available else 60), available)
+            self._availability.move_to_end(track.item_id)
+            while len(self._availability) > 500:
+                self._availability.popitem(last=False)
+            if not available:
+                logger.info("Spotify track %s has no confirmed audio source; hiding result", track.item_id)
+            return available
+
+        confirmed = await asyncio.gather(*(check(track) for track in tracks))
+        return [track for track, available in zip(tracks, confirmed) if available]
+
+    async def _source_available(self, item_id: str) -> bool:
+        if self.dependency_error:
+            raise ProviderError(self.dependency_error)
+        binary = self.managed_binary or shutil.which(self.spotdl_binary)
+        if binary is None:
+            raise ProviderError(f"spotdl executable {self.spotdl_binary!r} not found in PATH")
+        args = [binary, "url", TRACK_URL.format(id=item_id)]
+        if self.pass_credentials:
+            args += ["--client-id", self.client_id, "--client-secret", self.client_secret]
+        if self.ffmpeg_path:
+            args += ["--ffmpeg", self.ffmpeg_path]
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *args, env=tool_environment(),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            raise ProviderError(f"Cannot start spotdl source check: {exc.strerror}") from exc
+        try:
+            output, errors = await process.communicate()
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            raise
+        if process.returncode:
+            raise ProviderError(f"spotdl source check exited with {process.returncode}: {errors.decode(errors='replace')[-1000:]}")
+        for line in output.decode(errors="replace").splitlines():
+            candidate = line.strip()
+            try:
+                url = urlsplit(candidate)
+            except ValueError:
+                continue
+            if url.scheme == "https" and url.hostname in ("youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be"):
+                return True
+        diagnostic = (errors or output).decode(errors="replace")[-1000:].strip()
+        logger.info("spotdl returned no audio URL for %s: %s", item_id, diagnostic or "No output")
+        return False
 
     async def fetch_metadata(self, item_id: str) -> ExternalTrack | None:
         if not SPOTIFY_ID_RE.match(item_id):

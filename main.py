@@ -16,6 +16,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
+from starlette.requests import ClientDisconnect
 
 from config import Settings
 from config_store import ConfigStore
@@ -237,6 +238,11 @@ def create_app(
         external_ids: list[str],
         build_path: Callable[[dict[str, str]], str] | None = None,
     ) -> Response:
+        try:
+            await request.body()
+        except ClientDisconnect:
+            logger.info("Client disconnected before ingestion request body was received", extra={"activity": "download"})
+            return Response(status_code=499)
         if not await client_authorized(request):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         try:

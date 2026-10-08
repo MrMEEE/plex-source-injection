@@ -45,6 +45,7 @@ DEFAULTS = {
     "CLEANUP_INTERVAL_HOURS": "24",
     "SPOTDL_BINARY": "spotdl",
     "SPOTDL_PASS_CREDENTIALS": "false",
+    "SPOTIFY_CHECK_AVAILABILITY": "true",
     "SPOTIFY_CATEGORIES": "music",
     "YOUTUBE_CATEGORIES": "music",
     "SPOTDL_MODE": "external",
@@ -126,6 +127,8 @@ def validate(values: Mapping[str, str]) -> Settings:
         raise ValueError("SPOTDL_BINARY must not be empty")
     if values["SPOTDL_PASS_CREDENTIALS"].lower() not in ("true", "false", "1", "0", "yes", "no"):
         raise ValueError("SPOTDL_PASS_CREDENTIALS must be true or false")
+    if values.get("SPOTIFY_CHECK_AVAILABILITY", "true").lower() not in ("true", "false", "1", "0", "yes", "no"):
+        raise ValueError("SPOTIFY_CHECK_AVAILABILITY must be true or false")
     for key, modes in (
         ("SPOTDL_MODE", ("external", "managed", "managed-python")),
         ("YTDLP_MODE", ("bundled", "external", "managed")),

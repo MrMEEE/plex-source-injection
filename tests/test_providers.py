@@ -193,6 +193,160 @@ def test_spotdl_no_file_reports_downloader_output(tmp_path, monkeypatch):
         asyncio.run(SpotifyProvider(settings).download("4uLU6hMCjMI75M1A2tKUQC", tmp_path))
 
 
+def test_spotify_prescan_filters_caches_and_preserves_order(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    settings = Settings.from_env({"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret"})
+    provider = SpotifyProvider(settings)
+    ids = ["a" * 22, "b" * 22, "c" * 22]
+    provider._client = SimpleNamespace(search=lambda **kwargs: {
+        "tracks": {"items": [{"id": value, "name": value} for value in ids]}
+    })
+    checks = []
+
+    async def available(item_id):
+        checks.append(item_id)
+        return item_id != ids[1]
+
+    monkeypatch.setattr(provider, "_source_available", available)
+
+    async def run():
+        for _ in range(2):
+            assert [track.item_id for track in await provider.search("song", 10)] == [ids[0], ids[2]]
+        assert checks == ids
+        provider._availability[ids[1]] = (0, False)
+        await provider.search("song", 10)
+        assert checks == [*ids, ids[1]]
+    asyncio.run(run())
+
+
+def test_spotify_prescan_timeout_is_hidden_and_cancels_checks(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    settings = Settings.from_env({"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret", "PROVIDER_TIMEOUT": "0.1"})
+    provider = SpotifyProvider(settings)
+    provider._client = SimpleNamespace(search=lambda **kwargs: {"tracks": {"items": [{"id": "a" * 22}]}})
+    cancelled = []
+
+    async def available(item_id):
+        try:
+            await asyncio.sleep(5)
+        finally:
+            cancelled.append(item_id)
+
+    monkeypatch.setattr(provider, "_source_available", available)
+    assert asyncio.run(provider.search("song", 10)) == []
+    assert cancelled == ["a" * 22]
+    assert not provider._availability
+
+
+def test_spotify_prescan_runs_three_checks_in_parallel(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    settings = Settings.from_env({"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret"})
+    provider = SpotifyProvider(settings)
+    ids = [str(number) * 22 for number in range(7)]
+    provider._client = SimpleNamespace(search=lambda **kwargs: {
+        "tracks": {"items": [{"id": value} for value in ids]}
+    })
+    active = 0
+    peak = 0
+
+    async def available(item_id):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return True
+
+    monkeypatch.setattr(provider, "_source_available", available)
+    assert [track.item_id for track in asyncio.run(provider.search("song", 10))] == ids
+    assert peak == 3
+    assert active == 0
+
+
+def test_spotify_prescan_can_be_disabled_and_errors_are_not_cached(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    import providers.spotify as spotify
+    provider = SpotifyProvider(Settings.from_env({
+        "SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret",
+        "SPOTIFY_CHECK_AVAILABILITY": "false",
+    }))
+    provider._client = SimpleNamespace(search=lambda **kwargs: {"tracks": {"items": [{"id": "a" * 22}]}})
+    calls = []
+
+    async def failed(item_id):
+        calls.append(item_id)
+        raise spotify.ProviderError("source unavailable")
+
+    monkeypatch.setattr(provider, "_source_available", failed)
+
+    async def run():
+        assert len(await provider.search("song", 10)) == 1
+        assert not calls
+        provider.check_availability = True
+        for _ in range(2):
+            assert await provider.search("song", 10) == []
+        assert calls == ["a" * 22] * 2
+        assert not provider._availability
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("output,expected", [
+    (b"https://www.youtube.com/watch?v=abc\n", True),
+    (b"Processing query: https://open.spotify.com/track/abc\n", False),
+    (b"https://example.com/audio\n", False),
+    (b"", False),
+])
+def test_spotify_source_check_requires_audio_url(monkeypatch, output, expected):
+    import asyncio
+    import providers.spotify as spotify
+    calls = []
+
+    class Process:
+        returncode = 0
+        async def communicate(self):
+            return output, b""
+
+    async def execute(*args, **kwargs):
+        calls.append(args)
+        return Process()
+
+    monkeypatch.setattr(spotify.shutil, "which", lambda name: "/usr/bin/spotdl")
+    monkeypatch.setattr(spotify.asyncio, "create_subprocess_exec", execute)
+    provider = SpotifyProvider(Settings.from_env({"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret"}))
+    assert asyncio.run(provider._source_available("a" * 22)) is expected
+    assert calls[0][1] == "url"
+    assert "download" not in calls[0]
+
+
+def test_spotify_source_check_cancellation_reaps_process(monkeypatch):
+    import asyncio
+    import providers.spotify as spotify
+    actions = []
+
+    class Process:
+        returncode = None
+        async def communicate(self):
+            raise asyncio.CancelledError
+        def kill(self):
+            actions.append("kill")
+        async def wait(self):
+            actions.append("wait")
+
+    async def execute(*args, **kwargs):
+        return Process()
+
+    monkeypatch.setattr(spotify.shutil, "which", lambda name: "/usr/bin/spotdl")
+    monkeypatch.setattr(spotify.asyncio, "create_subprocess_exec", execute)
+    provider = SpotifyProvider(Settings.from_env({"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret"}))
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(provider._source_available("a" * 22))
+    assert actions == ["kill", "wait"]
+
+
 def test_youtube_external_cli_search_metadata_download(tmp_path, monkeypatch):
     import asyncio
     import json

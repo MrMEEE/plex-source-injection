@@ -114,6 +114,59 @@ def build_client(settings, upstream, providers=(), ingestor=None):
 JSON_HEADERS = {"Accept": "application/json", "X-Plex-Token": "client-token", "X-Plex-Client-Identifier": "amp"}
 
 
+def test_play_queue_body_is_read_before_slow_ingestion(settings, upstream):
+    state = {"resolved": False}
+
+    class DelayedIngestor(FakeIngestor):
+        async def download_and_register(self, external_id):
+            state["resolved"] = True
+            return await super().download_and_register(external_id)
+
+    class DisconnectAfterIngest:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            async def wrapped_receive():
+                if scope["type"] == "http" and state["resolved"]:
+                    return {"type": "http.disconnect"}
+                return await receive()
+            await self.app(scope, wrapped_receive, send)
+
+    provider = FakeProvider(settings)
+    ingestor = DelayedIngestor({"ext_fk_abc": "4242"})
+    app = create_app(settings, registry=ProviderRegistry([provider]), ingestor=ingestor,
+                     upstream_transport=streaming(upstream), enable_cleanup=False)
+    app.add_middleware(DisconnectAfterIngest)
+    with TestClient(app) as client:
+        client.post("/playQueues", params={"key": "/library/metadata/ext_fk_abc"},
+                    headers=JSON_HEADERS, content=b"original body")
+    forwarded = next(request for request in upstream.requests if request.url.path == "/playQueues")
+    assert forwarded.content == b"original body"
+    assert forwarded.url.params["key"] == "/library/metadata/4242"
+
+
+def test_disconnect_before_ingestion_does_not_download(settings, upstream):
+    class Disconnected:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            async def wrapped_receive():
+                return {"type": "http.disconnect"}
+            await self.app(scope, wrapped_receive if scope["type"] == "http" else receive, send)
+
+    ingestor = FakeIngestor({"ext_fk_abc": "4242"})
+    app = create_app(settings, registry=ProviderRegistry([FakeProvider(settings)]),
+                     ingestor=ingestor, upstream_transport=streaming(upstream), enable_cleanup=False)
+    app.add_middleware(Disconnected)
+    with TestClient(app) as client:
+        response = client.post("/playQueues", params={"key": "/library/metadata/ext_fk_abc"}, headers=JSON_HEADERS)
+    assert response.status_code == 499
+    assert not ingestor.calls
+    assert not upstream.requests
+
+
 def test_hubs_search_injects_external_results(settings, upstream):
     yt = make_provider_class("yt2", "yt", "YouTube")(settings, tracks=[track("dQw4w9WgXcQ", "Never", "Rick")])
     sp = make_provider_class("sp2", "sp", "Spotify")(settings, tracks=[track("4uLU6hMCjMI75M1A2tKUQC")])

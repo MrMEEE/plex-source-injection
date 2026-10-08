@@ -33,7 +33,12 @@ traffic. Both listeners share one process and live configuration.
    Local results, artist/album fields and downloaded track titles are unchanged.
 2. **Ingestion** – when a client requests `/library/metadata/ext_<prefix>_<id>` (or creates
    a play queue whose `uri` references one), the proxy verifies the client's token against
-   Plex, dispatches the download to the owning provider (`yt-dlp` / `spotdl`), writes it to
+   Plex after reading the request body, so long-running ingestion does not defer body
+   consumption until after the client may have disconnected. Disconnects before the body
+   is received are logged without starting ingestion. Playback clients/reverse proxies
+   still need a sufficient request timeout for downloading and indexing; a completed
+   download cannot deliver playback to a client that has already abandoned its request.
+   The proxy dispatches the download to the owning provider (`yt-dlp` / `spotdl`), writes it to
    `DOWNLOAD_DIR` as `Artist - Title [<id>].<ext>`, triggers
    `GET /library/sections/<MUSIC_SECTION_ID>/refresh?path=<PLEX_DOWNLOAD_DIR>`, polls Plex
    (via `python-plexapi`) until the file has a real ratingKey, and then returns Plex's own
@@ -362,6 +367,19 @@ and failed installations do not replace the selected version. Source checkouts
 need Python with pip/venv support. FFmpeg must still be configured separately.
 
 #### Tokens and credentials
+
+Spotify searches check spotdl audio-source availability by default before injecting
+results. The **Hide unconfirmed audio sources** switch on the Spotify plugin page
+controls `SPOTIFY_CHECK_AVAILABILITY`. Checks use `spotdl url`, not an audio download,
+with up to three checks running concurrently within the existing provider search
+timeout. Only confirmed YouTube/YouTube Music matches are shown; slow, failed or
+missing matches are hidden and logged. Positive results are cached for five minutes,
+negative results for one minute (up to 500 entries per provider runtime); configuration
+changes/restarts clear this cache. Timeouts/errors are not cached. Short provider
+timeouts may hide most results on a cold search; increase `PROVIDER_TIMEOUT` if needed.
+Spotdl uses Spotify metadata but gets audio from matching external sources. A successful
+prescan does not guarantee a later download: availability can change and downloads
+can still fail. Disabling the switch restores unfiltered Spotify metadata searches.
 
 The General page offers **Sign in with Plex**. Save outstanding changes, start sign-in,
 open the Plex authorization link, sign in (including MFA) on Plex's website, and click
