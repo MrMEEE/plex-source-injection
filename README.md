@@ -376,9 +376,14 @@ second, with up to three checks running concurrently within the existing provide
 timeout. Tracks without a YouTube match are hidden, as are slow or failed checks; all are
 logged. Spotdl's own matching (`spotdl url`) takes 15-35 seconds per track, too slow to
 run during a search, so this check is a heuristic. When a track is played, the matched
-video is reused (spotdl's `YouTubeURL|SpotifyURL` form), which skips spotdl's own
-matching while keeping Spotify metadata; the first YouTube result can occasionally be a
-different version of the song. Without a cached match spotdl matches as usual. Positive results are cached for five minutes,
+video is reused: the plugin fetches the full Spotify metadata itself and hands spotdl a
+complete song record (a temporary `.spotdl` file) with that video as the download URL, so
+spotdl makes no Spotify calls and skips its own matching. If that metadata lookup fails it
+falls back to spotdl's `YouTubeURL|SpotifyURL` form. The first YouTube result can
+occasionally be a different version of the song. Without a cached match spotdl matches as
+usual. Lyrics lookups are always disabled (`--lyrics` with no providers) because they add
+seconds and mostly fail. Together this cuts a matched Spotify download from about 27 to
+about 6 seconds, keeping it well within the time Plex clients wait. Positive results are cached for five minutes,
 negative results for one minute (up to 500 entries per provider runtime); configuration
 changes/restarts clear this cache. Timeouts/errors are not cached.
 Spotdl uses Spotify metadata but gets audio from matching external sources, so availability
@@ -531,7 +536,7 @@ is retained as an optional first-run import template, not an ongoing configurati
 | `SCAN_TIMEOUT` / `SCAN_POLL_INTERVAL` | `120` / `2` | Polling for the newly scanned track |
 | `CLEANUP_INTERVAL_HOURS` | `24` | Cleanup interval |
 | `SPOTDL_BINARY` | `spotdl` | spotdl executable name/path |
-| `SPOTDL_PASS_CREDENTIALS` | `false` | Pass the Spotify credentials to spotdl as CLI arguments (visible in the process list). By default spotdl uses its own `config.json`. |
+| `SPOTDL_PROVIDER_CREDENTIALS` | `true` | Give spotdl the plugin's Spotify credentials (and `use_official_api`) through a private, temporary `config.json` (mode 0600, own `HOME`), never on the command line. spotdl 4.5+ otherwise uses a keyless, rate-limited web client. Off uses spotdl's own `config.json`. Replaces the old `SPOTDL_PASS_CREDENTIALS`, which is removed on upgrade. |
 | `SPOTIFY_CATEGORIES` / `YOUTUBE_CATEGORIES` | `music` | Selected supported categories; empty disables all |
 | `SPOTDL_MODE` / `SPOTDL_BINARY` | `external` / `spotdl` | Managed release or your own executable |
 | `YTDLP_MODE` / `YTDLP_BINARY` | `bundled` / `yt-dlp` | Bundled Python package, managed release, or external CLI |

@@ -44,7 +44,7 @@ DEFAULTS = {
     "SCAN_POLL_INTERVAL": "2",
     "CLEANUP_INTERVAL_HOURS": "24",
     "SPOTDL_BINARY": "spotdl",
-    "SPOTDL_PASS_CREDENTIALS": "false",
+    "SPOTDL_PROVIDER_CREDENTIALS": "true",
     "SPOTIFY_CHECK_AVAILABILITY": "true",
     "SPOTIFY_CATEGORIES": "music",
     "YOUTUBE_CATEGORIES": "music",
@@ -125,8 +125,8 @@ def validate(values: Mapping[str, str]) -> Settings:
         raise ValueError("AUDIO_FORMAT must be an alphanumeric format name")
     if not values["SPOTDL_BINARY"].strip():
         raise ValueError("SPOTDL_BINARY must not be empty")
-    if values["SPOTDL_PASS_CREDENTIALS"].lower() not in ("true", "false", "1", "0", "yes", "no"):
-        raise ValueError("SPOTDL_PASS_CREDENTIALS must be true or false")
+    if values.get("SPOTDL_PROVIDER_CREDENTIALS", "true").lower() not in ("true", "false", "1", "0", "yes", "no"):
+        raise ValueError("SPOTDL_PROVIDER_CREDENTIALS must be true or false")
     if values.get("SPOTIFY_CHECK_AVAILABILITY", "true").lower() not in ("true", "false", "1", "0", "yes", "no"):
         raise ValueError("SPOTIFY_CHECK_AVAILABILITY must be true or false")
     for key, modes in (
@@ -178,6 +178,8 @@ class ConfigStore:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM metadata WHERE key = 'initialized'").fetchone():
+                # Replaced by SPOTDL_PROVIDER_CREDENTIALS, which never puts secrets on the command line.
+                db.execute("DELETE FROM configuration WHERE key = 'SPOTDL_PASS_CREDENTIALS'")
                 if self.path.resolve().parent == RPM_STATE_DIR:
                     row = db.execute("SELECT value FROM configuration WHERE key='DEPENDENCY_DIR'").fetchone()
                     previous = Path(row[0]) if row else RPM_STATE_DIR / "dependencies"

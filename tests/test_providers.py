@@ -1,3 +1,7 @@
+import json
+import os
+from pathlib import Path
+
 import pytest
 
 from config import Settings
@@ -143,9 +147,11 @@ def test_spotify_to_track():
     assert (track.artist, track.title, track.album, track.thumb) == ("A, B", "Song", "Album", "img")
 
 
-@pytest.mark.parametrize("opt_in,expected", [("", False), ("true", True)])
-def test_spotdl_credentials_only_passed_when_opted_in(tmp_path, monkeypatch, opt_in, expected):
+@pytest.mark.parametrize("opt_in,expected", [(None, True), ("true", True), ("false", False)])
+def test_spotdl_gets_credentials_through_private_config(tmp_path, monkeypatch, opt_in, expected):
     import asyncio
+    import json
+    import os
 
     import providers.spotify as spotify
 
@@ -160,46 +166,106 @@ def test_spotdl_credentials_only_passed_when_opted_in(tmp_path, monkeypatch, opt
 
     async def fake_exec(*args, **kwargs):
         captured["args"] = args
+        home = kwargs["env"].get("HOME", "")
+        config = os.path.join(home, ".config", "spotdl", "config.json")
+        if os.path.isfile(config):
+            captured["config"] = json.loads(open(config).read())
+            captured["mode"] = os.stat(config).st_mode & 0o777
+            captured["home"] = home
         return Process()
 
+    monkeypatch.setenv("HOME", str(tmp_path / "real-home"))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
     monkeypatch.setattr(spotify.shutil, "which", lambda name: "/usr/bin/spotdl")
     monkeypatch.setattr(spotify.asyncio, "create_subprocess_exec", fake_exec)
-    settings = Settings.from_env(
-        {"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret", "SPOTDL_PASS_CREDENTIALS": opt_in}
-    )
-    path = asyncio.run(SpotifyProvider(settings).download("4uLU6hMCjMI75M1A2tKUQC", tmp_path))
+    values = {"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret"}
+    if opt_in is not None:
+        values["SPOTDL_PROVIDER_CREDENTIALS"] = opt_in
+    path = asyncio.run(SpotifyProvider(Settings.from_env(values)).download("4uLU6hMCjMI75M1A2tKUQC", tmp_path))
     assert path.name == "A - B [4uLU6hMCjMI75M1A2tKUQC].mp3"
-    assert ("secret" in captured["args"]) is expected
+    assert "secret" not in captured["args"]
+    assert captured["args"][-1] == "--lyrics"
     assert "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC" in captured["args"]
+    assert ("config" in captured) is expected
+    if expected:
+        assert captured["config"] == {
+            "client_id": "id", "client_secret": "secret", "use_official_api": True, "load_config": True
+        }
+        assert captured["mode"] == 0o600
+        assert not os.path.exists(captured["home"])
 
 
-def test_spotdl_download_reuses_prescan_youtube_match(tmp_path, monkeypatch):
+class FakeSpotifyClient:
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    def track(self, track_id):
+        if self.fail:
+            raise RuntimeError("api down")
+        return {
+            "id": track_id, "name": "B", "duration_ms": 61500, "disc_number": 1, "track_number": 3,
+            "explicit": False, "popularity": 7, "external_ids": {"isrc": "DKXX1"},
+            "external_urls": {"spotify": f"https://open.spotify.com/track/{track_id}"},
+            "artists": [{"id": "art1", "name": "A"}, {"id": "art2", "name": "C"}],
+            "album": {"id": "alb1", "name": "Album", "total_tracks": 9},
+        }
+
+    def album(self, album_id):
+        return {
+            "id": album_id, "name": "Album", "artists": [{"name": "A"}], "album_type": "single",
+            "release_date": "2024-05-01", "total_tracks": 9, "label": "Label", "genres": [],
+            "copyrights": [{"text": "(C) Label"}], "tracks": {"items": [{"disc_number": 1}, {"disc_number": 2}]},
+            "images": [{"url": "small", "width": 64, "height": 64}, {"url": "big", "width": 640, "height": 640}],
+        }
+
+    def artist(self, artist_id):
+        return {"genres": ["danish pop"]}
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_spotdl_download_reuses_prescan_youtube_match(tmp_path, monkeypatch, fail):
     import asyncio
     import time
 
     import providers.spotify as spotify
 
     captured = {}
+    out = tmp_path / "out"
 
     class Process:
         returncode = 0
 
         async def communicate(self):
-            (tmp_path / "A - B [4uLU6hMCjMI75M1A2tKUQC].mp3").write_bytes(b"x")
+            (out / "A - B [4uLU6hMCjMI75M1A2tKUQC].mp3").write_bytes(b"x")
             return b"", None
 
     async def fake_exec(*args, **kwargs):
         captured["args"] = args
+        if args[2].endswith(".spotdl"):
+            captured["songs"] = json.loads(Path(args[2]).read_text())
         return Process()
 
     monkeypatch.setattr(spotify.shutil, "which", lambda name: "/usr/bin/spotdl")
     monkeypatch.setattr(spotify.asyncio, "create_subprocess_exec", fake_exec)
     provider = SpotifyProvider(Settings.from_env({"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret"}))
+    provider._client = FakeSpotifyClient(fail=fail)
     provider._availability["4uLU6hMCjMI75M1A2tKUQC"] = (time.monotonic() - 1, "dQw4w9WgXcQ")
-    asyncio.run(provider.download("4uLU6hMCjMI75M1A2tKUQC", tmp_path))
-    assert captured["args"][2] == (
-        "https://www.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
-    )
+    asyncio.run(provider.download("4uLU6hMCjMI75M1A2tKUQC", out))
+    if fail:
+        assert captured["args"][2] == (
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+        )
+        return
+    assert not os.path.exists(captured["args"][2])
+    [song] = captured["songs"]
+    assert song["download_url"] == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    assert song["artists"] == ["A", "C"] and song["genres"] == ["danish pop"]
+    assert (song["year"], song["disc_count"], song["tracks_count"], song["duration"]) == (2024, 2, 9, 61)
+    assert (song["cover_url"], song["publisher"], song["copyright_text"]) == ("big", "Label", "(C) Label")
+    assert song["isrc"] == "DKXX1"
+    # Every field spotdl checks before re-fetching from Spotify must be present.
+    for key in ("genres", "disc_count", "tracks_count", "track_number", "album_id", "album_artist"):
+        assert song[key] is not None
 
 
 def test_spotdl_no_file_reports_downloader_output(tmp_path, monkeypatch):
@@ -474,4 +540,4 @@ def test_managed_spotdl_and_ffmpeg_paths_are_used(tmp_path, monkeypatch):
     provider = SpotifyProvider(settings)
     asyncio.run(provider.download("4uLU6hMCjMI75M1A2tKUQC", tmp_path))
     assert calls[0][0] == str(root / "spotdl" / "v1" / "spotdl")
-    assert calls[0][-2:] == ("--ffmpeg", str(root / "ffmpeg" / "v1" / "ffmpeg"))
+    assert calls[0][-3:] == ("--ffmpeg", str(root / "ffmpeg" / "v1" / "ffmpeg"), "--lyrics")

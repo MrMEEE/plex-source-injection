@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import re
 import shutil
+import tempfile
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -48,9 +51,11 @@ class SpotifyProvider(BaseProvider):
             kind="switch", default="true",
         ),
         ProviderSetting(
-            "SPOTDL_PASS_CREDENTIALS", "Pass credentials to spotdl",
-            "Exposes Spotify credentials in the process list. Off uses spotdl's own config.json.",
-            kind="switch", default="false",
+            "SPOTDL_PROVIDER_CREDENTIALS", "Give spotdl these credentials",
+            "Passed through a private temporary config file, never the command line, and makes spotdl "
+            "use the official Spotify API instead of its keyless, rate-limited web client. Off uses "
+            "spotdl's own config.json.",
+            kind="switch", default="true",
         ),
     )
 
@@ -70,9 +75,7 @@ class SpotifyProvider(BaseProvider):
         except DependencyError as exc:
             self.dependency_error = str(exc)
             self.ffmpeg_path = None
-        # Passing credentials on the command line exposes them in the process list, so it is
-        # opt-in; by default spotdl uses the credentials from its own config.json.
-        self.pass_credentials = (settings.get("SPOTDL_PASS_CREDENTIALS", "false") or "").lower() in (
+        self.provider_credentials = (settings.get("SPOTDL_PROVIDER_CREDENTIALS", "true") or "").lower() in (
             "1",
             "true",
             "yes",
@@ -236,6 +239,79 @@ class SpotifyProvider(BaseProvider):
 
         return await asyncio.to_thread(_fetch)
 
+    def _song_record(self, item_id: str, video_id: str) -> dict[str, Any]:
+        """Build spotdl's full song record (as ``Song.from_url`` would) with our own client.
+
+        Handing spotdl a complete record in a ``.spotdl`` file skips its own Spotify
+        lookups, which go through a shared, rate-limited client and take seconds.
+        """
+        client = self._spotify()
+        track = client.track(item_id)
+        if not track or not track.get("artists") or not track.get("album"):
+            raise ProviderError(f"Spotify returned no usable metadata for {item_id}")
+        artist_id = track["artists"][0].get("id")
+        album_id = track["album"]["id"]
+        album = client.album(album_id) or track["album"]
+        artist = (client.artist(artist_id) if artist_id else None) or {}
+        release_date = str(album.get("release_date") or "")
+        album_tracks = ((album.get("tracks") or {}).get("items")) or []
+        images = [i for i in album.get("images") or [] if i.get("url")]
+        copyrights = album.get("copyrights") or []
+        return {
+            "name": track["name"],
+            "artists": [a["name"] for a in track["artists"]],
+            "artist": track["artists"][0]["name"],
+            "artist_id": artist_id,
+            "genres": list(album.get("genres") or []) + list(artist.get("genres") or []),
+            "disc_number": track.get("disc_number") or 1,
+            "disc_count": int(album_tracks[-1].get("disc_number") or 1) if album_tracks else track.get("disc_number") or 1,
+            "album_name": album.get("name") or "",
+            "album_artist": ((album.get("artists") or track["artists"])[0]).get("name") or "",
+            "album_id": album_id,
+            "album_type": album.get("album_type"),
+            "duration": int((track.get("duration_ms") or 0) / 1000),
+            "year": int(release_date[:4]) if release_date[:4].isdigit() else 0,
+            "date": release_date,
+            "track_number": track.get("track_number") or 1,
+            "tracks_count": album.get("total_tracks") or track["album"].get("total_tracks") or 1,
+            "song_id": track["id"],
+            "explicit": bool(track.get("explicit")),
+            "publisher": album.get("label") or "",
+            "url": (track.get("external_urls") or {}).get("spotify") or TRACK_URL.format(id=item_id),
+            # spotdl's tagger crashes on a null ISRC; an empty one is skipped.
+            "isrc": (track.get("external_ids") or {}).get("isrc") or "",
+            "cover_url": max(images, key=lambda i: (i.get("width") or 0) * (i.get("height") or 0))["url"] if images else None,
+            "copyright_text": copyrights[0].get("text") if copyrights else None,
+            "download_url": WATCH_URL.format(id=video_id),
+            "popularity": track.get("popularity"),
+        }
+
+    def _private_config_env(self, home: Path) -> dict[str, str]:
+        """Environment where spotdl loads our credentials from a private config.json.
+
+        spotdl only reads ``~/.config/spotdl/config.json``, so HOME points at a 0700 temporary
+        directory. The real cache directory is kept so yt-dlp's caches survive between runs.
+        """
+        env = tool_environment()
+        real_home = env.get("HOME") or str(Path.home())
+        env.setdefault("XDG_CACHE_HOME", str(Path(real_home) / ".cache"))
+        env["HOME"] = str(home)
+        config_dir = home / ".config" / "spotdl"
+        config_dir.mkdir(parents=True, mode=0o700)
+        fd = os.open(config_dir / "config.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as config:
+            json.dump(
+                {
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                    # spotdl 4.5+ otherwise uses a keyless web client that ignores credentials.
+                    "use_official_api": True,
+                    "load_config": True,
+                },
+                config,
+            )
+        return env
+
     async def download(self, item_id: str, output_dir: Path) -> Path:
         if not SPOTIFY_ID_RE.match(item_id):
             raise ProviderError(f"Invalid Spotify track id: {item_id!r}")
@@ -246,35 +322,49 @@ class SpotifyProvider(BaseProvider):
             raise ProviderError(f"spotdl executable {self.spotdl_binary!r} not found in PATH")
         output_dir.mkdir(parents=True, exist_ok=True)
         query = TRACK_URL.format(id=item_id)
+        record: dict[str, Any] | None = None
         matched = self._availability.get(item_id)
         if matched and matched[1]:
-            # spotdl's "YouTubeURL|SpotifyURL" form downloads that video with Spotify metadata.
-            query = f"{WATCH_URL.format(id=matched[1])}|{query}"
             logger.info("Reusing YouTube match %s for Spotify track %s", matched[1], item_id)
-        args = [
-            binary,
-            "download",
-            query,
-            "--output",
-            str(output_dir / OUTPUT_TEMPLATE),
-            "--format",
-            self.settings.audio_format,
-        ]
-        if self.pass_credentials:
-            args += ["--client-id", self.client_id, "--client-secret", self.client_secret]
-        if self.ffmpeg_path:
-            args += ["--ffmpeg", self.ffmpeg_path]
-        process = await asyncio.create_subprocess_exec(
-            *args, env=tool_environment(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
-        )
-        try:
-            output, _ = await asyncio.wait_for(
-                process.communicate(), timeout=self.settings.download_timeout
+            try:
+                record = await asyncio.to_thread(self._song_record, item_id, matched[1])
+            except Exception as exc:  # noqa: BLE001 - fall back to letting spotdl fetch metadata
+                logger.warning("Could not prepare Spotify metadata for %s; spotdl will fetch it: %s", item_id, exc)
+                # spotdl's "YouTubeURL|SpotifyURL" form downloads that video with Spotify metadata.
+                query = f"{WATCH_URL.format(id=matched[1])}|{query}"
+        with tempfile.TemporaryDirectory(prefix="spotdl-") as home:
+            if record is not None:
+                song_file = Path(home) / f"{item_id}.spotdl"
+                song_file.write_text(json.dumps([record]), encoding="utf-8")
+                query = str(song_file)
+            args = [
+                binary,
+                "download",
+                query,
+                "--output",
+                str(output_dir / OUTPUT_TEMPLATE),
+                "--format",
+                self.settings.audio_format,
+            ]
+            if self.ffmpeg_path:
+                args += ["--ffmpeg", self.ffmpeg_path]
+            # An empty provider list skips lyrics lookups, which add seconds and mostly fail.
+            args.append("--lyrics")
+            env = self._private_config_env(Path(home)) if self.provider_credentials else tool_environment()
+            process = await asyncio.create_subprocess_exec(
+                *args, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
             )
-        except asyncio.TimeoutError as exc:
-            process.kill()
-            await process.wait()
-            raise ProviderError(f"spotdl timed out downloading {item_id}") from exc
+            try:
+                output, _ = await asyncio.wait_for(
+                    process.communicate(), timeout=self.settings.download_timeout
+                )
+            except BaseException as exc:
+                if process.returncode is None:
+                    process.kill()
+                await process.wait()
+                if isinstance(exc, asyncio.TimeoutError):
+                    raise ProviderError(f"spotdl timed out downloading {item_id}") from exc
+                raise
         if process.returncode != 0:
             tail = output.decode(errors="replace")[-500:] if output else ""
             raise ProviderError(f"spotdl exited with {process.returncode}: {tail}")

@@ -101,7 +101,7 @@ def test_save_roundtrip_and_provider_get(tmp_path):
     ("CLEANUP_INTERVAL_HOURS", "-1"), ("PLEX_URL", "file:///etc/passwd"),
     ("PLEX_URL", "http://user:pass@localhost"), ("PLEX_URL", "http://localhost:99999"),
     ("DOWNLOAD_DIR", "/"), ("DOWNLOAD_DIR", "relative"), ("PLEX_DOWNLOAD_DIR", "relative"),
-    ("AUDIO_FORMAT", "../mp3"), ("SPOTDL_BINARY", ""), ("SPOTDL_PASS_CREDENTIALS", "sometimes"),
+    ("AUDIO_FORMAT", "../mp3"), ("SPOTDL_BINARY", ""), ("SPOTDL_PROVIDER_CREDENTIALS", "sometimes"),
     ("ENABLED_PROVIDERS", "invalid-name"), ("INVALID-KEY", "x"), ("CONFIG_DB", "x"),
 ])
 def test_invalid_values_are_not_saved(tmp_path, key, value):
@@ -197,3 +197,14 @@ def test_password_setup_entrypoint(tmp_path, monkeypatch, capsys):
     run()
     assert ConfigStore(path).verify_password("setup-password-123")
     assert "Login username: admin" in capsys.readouterr().out
+
+
+def test_legacy_spotdl_pass_credentials_key_is_removed(tmp_path):
+    store = ConfigStore(tmp_path / "config.sqlite3")
+    store.initialize({})
+    with store.connect() as db:
+        db.execute("INSERT INTO configuration VALUES ('SPOTDL_PASS_CREDENTIALS', 'false')")
+    store.initialize({})
+    values = store.values()
+    assert "SPOTDL_PASS_CREDENTIALS" not in values
+    assert values["SPOTDL_PROVIDER_CREDENTIALS"] == "true"

@@ -84,7 +84,7 @@ def test_plugin_pages_schema_is_discovered_and_does_not_contain_credentials(admi
     assert plugins["spotify"]["display_name"] == "Spotify"
     assert "spotdl" in plugins["spotify"]["description"]
     spotify = {field["key"]: field for field in plugins["spotify"]["fields"]}
-    assert spotify["SPOTDL_PASS_CREDENTIALS"]["kind"] == "switch"
+    assert spotify["SPOTDL_PROVIDER_CREDENTIALS"]["kind"] == "switch"
     assert spotify["SPOTDL_BINARY"]["default"] == "spotdl"
     assert spotify["SPOTIFY_CLIENT_SECRET"]["default"] == ""
     assert plugins["youtube"]["fields"][0]["key"] == "YOUTUBE_API_KEY"
