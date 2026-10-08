@@ -375,13 +375,20 @@ for `artist - title` (the configured yt-dlp, or the bundled module), typically u
 second, with up to three checks running concurrently within the existing provider search
 timeout. Tracks without a YouTube match are hidden, as are slow or failed checks; all are
 logged. Spotdl's own matching (`spotdl url`) takes 15-35 seconds per track, too slow to
-run during a search, so this check is a heuristic: spotdl can still reject the match when
-the track is played. Positive results are cached for five minutes,
+run during a search, so this check is a heuristic. When a track is played, the matched
+video is reused (spotdl's `YouTubeURL|SpotifyURL` form), which skips spotdl's own
+matching while keeping Spotify metadata; the first YouTube result can occasionally be a
+different version of the song. Without a cached match spotdl matches as usual. Positive results are cached for five minutes,
 negative results for one minute (up to 500 entries per provider runtime); configuration
 changes/restarts clear this cache. Timeouts/errors are not cached.
 Spotdl uses Spotify metadata but gets audio from matching external sources, so availability
 can change and downloads can still fail. Disabling the switch restores unfiltered Spotify
 metadata searches.
+
+If a download plus Plex scan takes longer than the client is willing to wait, the client
+gives up before playback starts. The download still finishes and the Logs page shows
+"Client gave up while the item was being prepared; … ready in Plex, press play again";
+pressing play again then starts immediately.
 
 The General page offers **Sign in with Plex**. Save outstanding changes, start sign-in,
 open the Plex authorization link, sign in (including MFA) on Plex's website, and click

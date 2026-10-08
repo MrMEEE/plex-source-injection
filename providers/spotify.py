@@ -25,6 +25,7 @@ from .registry import register_provider
 logger = logging.getLogger(__name__)
 
 TRACK_URL = "https://open.spotify.com/track/{id}"
+WATCH_URL = "https://www.youtube.com/watch?v={id}"
 OUTPUT_TEMPLATE = "{artist} - {title} [{track-id}].{output-ext}"
 SPOTIFY_ID_RE = re.compile(r"^[A-Za-z0-9]{22}$")
 YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
@@ -78,7 +79,9 @@ class SpotifyProvider(BaseProvider):
         )
         self._client: Any = None
         self.check_availability = settings.get("SPOTIFY_CHECK_AVAILABILITY", "true").lower() in ("true", "1", "yes")
-        self._availability: OrderedDict[str, tuple[float, bool]] = OrderedDict()
+        # Spotify track id -> (recheck after, matched YouTube video id or None). Entries stay
+        # until evicted so downloads can reuse the match after the recheck time has passed.
+        self._availability: OrderedDict[str, tuple[float, str | None]] = OrderedDict()
         self._availability_slots = asyncio.Semaphore(3)
         self.ytdlp_binary: str | None = None
         self.ytdlp_error: str | None = None
@@ -135,7 +138,7 @@ class SpotifyProvider(BaseProvider):
             cached = self._availability.get(track.item_id)
             if cached and cached[0] > time.monotonic():
                 self._availability.move_to_end(track.item_id)
-                return cached[1]
+                return cached[1] is not None
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 logger.warning("Spotify source check budget exhausted for %s; hiding result", track.item_id)
@@ -143,29 +146,29 @@ class SpotifyProvider(BaseProvider):
             try:
                 async with asyncio.timeout(remaining):
                     async with self._availability_slots:
-                        available = await self._source_available(track)
+                        video_id = await self._source_available(track)
             except TimeoutError:
                 logger.warning("Spotify source check timed out for %s; hiding result", track.item_id)
                 return False
             except ProviderError as exc:
                 logger.warning("Spotify source check failed for %s; hiding result: %s", track.item_id, exc)
                 return False
-            self._availability[track.item_id] = (time.monotonic() + (300 if available else 60), available)
+            self._availability[track.item_id] = (time.monotonic() + (300 if video_id else 60), video_id)
             self._availability.move_to_end(track.item_id)
             while len(self._availability) > 500:
                 self._availability.popitem(last=False)
-            if not available:
+            if video_id is None:
                 logger.info("Spotify track %s has no confirmed audio source; hiding result", track.item_id)
-            return available
+            return video_id is not None
 
         confirmed = await asyncio.gather(*(check(track) for track in tracks))
         return [track for track, available in zip(tracks, confirmed) if available]
 
-    async def _source_available(self, track: ExternalTrack) -> bool:
-        """Quick heuristic: a YouTube search for "artist - title" returns at least one video.
+    async def _source_available(self, track: ExternalTrack) -> str | None:
+        """Quick heuristic: return the first YouTube video id for "artist - title", if any.
 
         spotdl's own matching takes 15-35 seconds per track, far too slow for a search
-        response, so a match here does not guarantee that spotdl will accept it later.
+        response. The match is reused for the download, skipping spotdl's matching.
         """
         if self.ytdlp_error:
             raise ProviderError(self.ytdlp_error)
@@ -174,11 +177,11 @@ class SpotifyProvider(BaseProvider):
             found = await asyncio.to_thread(self._youtube_search_module, query)
         else:
             found = await self._youtube_search_cli(query)
-        if not found:
+        if found is None:
             logger.info("No YouTube match for Spotify track %s (%s - %s)", track.item_id, track.artist, track.title)
         return found
 
-    async def _youtube_search_cli(self, query: str) -> bool:
+    async def _youtube_search_cli(self, query: str) -> str | None:
         args = [self.ytdlp_binary, "--ignore-config", "--no-warnings", "--flat-playlist", "--print", "id", query]
         try:
             process = await asyncio.create_subprocess_exec(
@@ -196,10 +199,13 @@ class SpotifyProvider(BaseProvider):
             raise
         if process.returncode:
             raise ProviderError(f"yt-dlp source check exited with {process.returncode}: {errors.decode(errors='replace')[-1000:]}")
-        return any(YOUTUBE_ID_RE.match(line.strip()) for line in output.decode(errors="replace").splitlines())
+        return next(
+            (line.strip() for line in output.decode(errors="replace").splitlines() if YOUTUBE_ID_RE.match(line.strip())),
+            None,
+        )
 
     @staticmethod
-    def _youtube_search_module(query: str) -> bool:
+    def _youtube_search_module(query: str) -> str | None:
         try:
             import yt_dlp
         except ImportError as exc:
@@ -210,7 +216,11 @@ class SpotifyProvider(BaseProvider):
                 info = ydl.extract_info(query, download=False)
         except Exception as exc:
             raise ProviderError(f"yt-dlp source check failed: {exc}") from exc
-        return any(entry and entry.get("id") for entry in (info or {}).get("entries") or [])
+        return next(
+            (entry["id"] for entry in (info or {}).get("entries") or []
+             if entry and YOUTUBE_ID_RE.match(str(entry.get("id") or ""))),
+            None,
+        )
 
     async def fetch_metadata(self, item_id: str) -> ExternalTrack | None:
         if not SPOTIFY_ID_RE.match(item_id):
@@ -235,10 +245,16 @@ class SpotifyProvider(BaseProvider):
         if binary is None:
             raise ProviderError(f"spotdl executable {self.spotdl_binary!r} not found in PATH")
         output_dir.mkdir(parents=True, exist_ok=True)
+        query = TRACK_URL.format(id=item_id)
+        matched = self._availability.get(item_id)
+        if matched and matched[1]:
+            # spotdl's "YouTubeURL|SpotifyURL" form downloads that video with Spotify metadata.
+            query = f"{WATCH_URL.format(id=matched[1])}|{query}"
+            logger.info("Reusing YouTube match %s for Spotify track %s", matched[1], item_id)
         args = [
             binary,
             "download",
-            TRACK_URL.format(id=item_id),
+            query,
             "--output",
             str(output_dir / OUTPUT_TEMPLATE),
             "--format",

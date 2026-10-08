@@ -258,6 +258,13 @@ def create_app(
             logger.exception("Unexpected ingest failure", extra={"activity": "download"})
             return JSONResponse({"error": "Failed to fetch external item"}, status_code=502)
         path = build_path(mapping) if build_path is not None else None
+        if await request.is_disconnected():
+            ready = ", ".join(f"{ext} as ratingKey {key}" for ext, key in {**mapping, **query_mapping}.items())
+            logger.warning(
+                "Client gave up while the item was being prepared; %s is ready in Plex, press play again",
+                ready or "the item", extra={"activity": "download"},
+            )
+            return Response(status_code=499)
         response = await proxy(request, path=path, query=query)
         if response.status_code == 404:
             for ext in {**mapping, **query_mapping}:

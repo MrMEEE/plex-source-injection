@@ -173,6 +173,35 @@ def test_spotdl_credentials_only_passed_when_opted_in(tmp_path, monkeypatch, opt
     assert "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC" in captured["args"]
 
 
+def test_spotdl_download_reuses_prescan_youtube_match(tmp_path, monkeypatch):
+    import asyncio
+    import time
+
+    import providers.spotify as spotify
+
+    captured = {}
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            (tmp_path / "A - B [4uLU6hMCjMI75M1A2tKUQC].mp3").write_bytes(b"x")
+            return b"", None
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = args
+        return Process()
+
+    monkeypatch.setattr(spotify.shutil, "which", lambda name: "/usr/bin/spotdl")
+    monkeypatch.setattr(spotify.asyncio, "create_subprocess_exec", fake_exec)
+    provider = SpotifyProvider(Settings.from_env({"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret"}))
+    provider._availability["4uLU6hMCjMI75M1A2tKUQC"] = (time.monotonic() - 1, "dQw4w9WgXcQ")
+    asyncio.run(provider.download("4uLU6hMCjMI75M1A2tKUQC", tmp_path))
+    assert captured["args"][2] == (
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+    )
+
+
 def test_spotdl_no_file_reports_downloader_output(tmp_path, monkeypatch):
     import asyncio
     import providers.spotify as spotify
@@ -206,7 +235,7 @@ def test_spotify_prescan_filters_caches_and_preserves_order(monkeypatch):
 
     async def available(track):
         checks.append(track.item_id)
-        return track.item_id != ids[1]
+        return None if track.item_id == ids[1] else "dQw4w9WgXcQ"
 
     monkeypatch.setattr(provider, "_source_available", available)
 
@@ -214,7 +243,7 @@ def test_spotify_prescan_filters_caches_and_preserves_order(monkeypatch):
         for _ in range(2):
             assert [track.item_id for track in await provider.search("song", 10)] == [ids[0], ids[2]]
         assert checks == ids
-        provider._availability[ids[1]] = (0, False)
+        provider._availability[ids[1]] = (0, None)
         await provider.search("song", 10)
         assert checks == [*ids, ids[1]]
     asyncio.run(run())
@@ -258,7 +287,7 @@ def test_spotify_prescan_runs_three_checks_in_parallel(monkeypatch):
         peak = max(peak, active)
         await asyncio.sleep(0.02)
         active -= 1
-        return True
+        return "dQw4w9WgXcQ"
 
     monkeypatch.setattr(provider, "_source_available", available)
     assert [track.item_id for track in asyncio.run(provider.search("song", 10))] == ids
@@ -300,9 +329,9 @@ def _checked_track():
 
 
 @pytest.mark.parametrize("output,expected", [
-    (b"dQw4w9WgXcQ\n", True),
-    (b"NA\n", False),
-    (b"", False),
+    (b"dQw4w9WgXcQ\n", "dQw4w9WgXcQ"),
+    (b"NA\n", None),
+    (b"", None),
 ])
 def test_spotify_source_check_searches_youtube_with_cli(monkeypatch, output, expected):
     import asyncio
@@ -323,7 +352,7 @@ def test_spotify_source_check_searches_youtube_with_cli(monkeypatch, output, exp
     provider = SpotifyProvider(Settings.from_env({
         "SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret", "YTDLP_MODE": "managed",
     }))
-    assert asyncio.run(provider._source_available(_checked_track())) is expected
+    assert asyncio.run(provider._source_available(_checked_track())) == expected
     assert calls[0][0] == "/opt/yt-dlp"
     assert calls[0][-1] == "ytsearch1:APHACA - Klip Klap"
     assert "--flat-playlist" in calls[0]
@@ -348,7 +377,7 @@ def test_spotify_source_check_uses_bundled_module(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=YoutubeDL))
     provider = SpotifyProvider(Settings.from_env({"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret"}))
-    assert asyncio.run(provider._source_available(_checked_track())) is True
+    assert asyncio.run(provider._source_available(_checked_track())) == "dQw4w9WgXcQ"
     assert queries == ["ytsearch1:APHACA - Klip Klap"]
 
 

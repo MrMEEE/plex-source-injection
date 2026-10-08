@@ -114,13 +114,25 @@ def build_client(settings, upstream, providers=(), ingestor=None):
 JSON_HEADERS = {"Accept": "application/json", "X-Plex-Token": "client-token", "X-Plex-Client-Identifier": "amp"}
 
 
-def test_play_queue_body_is_read_before_slow_ingestion(settings, upstream):
-    state = {"resolved": False}
+def test_play_queue_body_is_forwarded_after_ingestion(settings, upstream):
+    ingestor = FakeIngestor({"ext_fk_abc": "4242"})
+    app = create_app(settings, registry=ProviderRegistry([FakeProvider(settings)]), ingestor=ingestor,
+                     upstream_transport=streaming(upstream), enable_cleanup=False)
+    with TestClient(app) as client:
+        client.post("/playQueues", params={"key": "/library/metadata/ext_fk_abc"},
+                    headers=JSON_HEADERS, content=b"original body")
+    forwarded = next(request for request in upstream.requests if request.url.path == "/playQueues")
+    assert forwarded.content == b"original body"
+    assert forwarded.url.params["key"] == "/library/metadata/4242"
 
-    class DelayedIngestor(FakeIngestor):
+
+def test_client_giving_up_during_ingestion_is_logged_and_not_forwarded(settings, upstream, caplog):
+    class GiveUpIngestor(FakeIngestor):
         async def download_and_register(self, external_id):
             state["resolved"] = True
             return await super().download_and_register(external_id)
+
+    state = {"resolved": False}
 
     class DisconnectAfterIngest:
         def __init__(self, app):
@@ -133,17 +145,16 @@ def test_play_queue_body_is_read_before_slow_ingestion(settings, upstream):
                 return await receive()
             await self.app(scope, wrapped_receive, send)
 
-    provider = FakeProvider(settings)
-    ingestor = DelayedIngestor({"ext_fk_abc": "4242"})
-    app = create_app(settings, registry=ProviderRegistry([provider]), ingestor=ingestor,
+    ingestor = GiveUpIngestor({"ext_fk_abc": "4242"})
+    app = create_app(settings, registry=ProviderRegistry([FakeProvider(settings)]), ingestor=ingestor,
                      upstream_transport=streaming(upstream), enable_cleanup=False)
     app.add_middleware(DisconnectAfterIngest)
-    with TestClient(app) as client:
-        client.post("/playQueues", params={"key": "/library/metadata/ext_fk_abc"},
-                    headers=JSON_HEADERS, content=b"original body")
-    forwarded = next(request for request in upstream.requests if request.url.path == "/playQueues")
-    assert forwarded.content == b"original body"
-    assert forwarded.url.params["key"] == "/library/metadata/4242"
+    with caplog.at_level("WARNING"), TestClient(app) as client:
+        response = client.post("/playQueues", params={"key": "/library/metadata/ext_fk_abc"}, headers=JSON_HEADERS)
+    assert response.status_code == 499
+    assert ingestor.calls == ["ext_fk_abc"]
+    assert not any(request.url.path == "/playQueues" for request in upstream.requests)
+    assert "ext_fk_abc as ratingKey 4242 is ready in Plex, press play again" in caplog.text
 
 
 def test_disconnect_before_ingestion_does_not_download(settings, upstream):
