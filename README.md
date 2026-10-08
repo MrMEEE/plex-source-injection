@@ -368,18 +368,20 @@ need Python with pip/venv support. FFmpeg must still be configured separately.
 
 #### Tokens and credentials
 
-Spotify searches check spotdl audio-source availability by default before injecting
+Spotify searches quickly check for a likely audio source by default before injecting
 results. The **Hide unconfirmed audio sources** switch on the Spotify plugin page
-controls `SPOTIFY_CHECK_AVAILABILITY`. Checks use `spotdl url`, not an audio download,
-with up to three checks running concurrently within the existing provider search
-timeout. Only confirmed YouTube/YouTube Music matches are shown; slow, failed or
-missing matches are hidden and logged. Positive results are cached for five minutes,
+controls `SPOTIFY_CHECK_AVAILABILITY`. Each check is a one-result yt-dlp YouTube search
+for `artist - title` (the configured yt-dlp, or the bundled module), typically under a
+second, with up to three checks running concurrently within the existing provider search
+timeout. Tracks without a YouTube match are hidden, as are slow or failed checks; all are
+logged. Spotdl's own matching (`spotdl url`) takes 15-35 seconds per track, too slow to
+run during a search, so this check is a heuristic: spotdl can still reject the match when
+the track is played. Positive results are cached for five minutes,
 negative results for one minute (up to 500 entries per provider runtime); configuration
-changes/restarts clear this cache. Timeouts/errors are not cached. Short provider
-timeouts may hide most results on a cold search; increase `PROVIDER_TIMEOUT` if needed.
-Spotdl uses Spotify metadata but gets audio from matching external sources. A successful
-prescan does not guarantee a later download: availability can change and downloads
-can still fail. Disabling the switch restores unfiltered Spotify metadata searches.
+changes/restarts clear this cache. Timeouts/errors are not cached.
+Spotdl uses Spotify metadata but gets audio from matching external sources, so availability
+can change and downloads can still fail. Disabling the switch restores unfiltered Spotify
+metadata searches.
 
 The General page offers **Sign in with Plex**. Save outstanding changes, start sign-in,
 open the Plex authorization link, sign in (including MFA) on Plex's website, and click

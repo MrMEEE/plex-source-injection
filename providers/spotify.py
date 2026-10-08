@@ -10,7 +10,6 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from dependencies import DependencyError, ffmpeg_location, resolve_tool, tool_environment
 from .base import (
@@ -28,6 +27,7 @@ logger = logging.getLogger(__name__)
 TRACK_URL = "https://open.spotify.com/track/{id}"
 OUTPUT_TEMPLATE = "{artist} - {title} [{track-id}].{output-ext}"
 SPOTIFY_ID_RE = re.compile(r"^[A-Za-z0-9]{22}$")
+YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
 @register_provider
@@ -43,7 +43,7 @@ class SpotifyProvider(BaseProvider):
         ProviderSetting("SPOTDL_BINARY", "spotdl executable", "Executable name or absolute path.", default="spotdl"),
         ProviderSetting(
             "SPOTIFY_CHECK_AVAILABILITY", "Hide unconfirmed audio sources",
-            "Check audio matches with spotdl before showing Spotify results. Slow or failed checks are hidden; results are cached briefly.",
+            "Quickly search YouTube for each Spotify result and hide tracks with no match. Slow or failed checks are hidden; results are cached briefly.",
             kind="switch", default="true",
         ),
         ProviderSetting(
@@ -80,6 +80,13 @@ class SpotifyProvider(BaseProvider):
         self.check_availability = settings.get("SPOTIFY_CHECK_AVAILABILITY", "true").lower() in ("true", "1", "yes")
         self._availability: OrderedDict[str, tuple[float, bool]] = OrderedDict()
         self._availability_slots = asyncio.Semaphore(3)
+        self.ytdlp_binary: str | None = None
+        self.ytdlp_error: str | None = None
+        if self.check_availability and settings.get("YTDLP_MODE", "bundled") != "bundled":
+            try:
+                self.ytdlp_binary = resolve_tool(settings, "yt-dlp")
+            except DependencyError as exc:
+                self.ytdlp_error = str(exc)
 
     def _spotify(self) -> Any:
         if self._client is None:
@@ -136,7 +143,7 @@ class SpotifyProvider(BaseProvider):
             try:
                 async with asyncio.timeout(remaining):
                     async with self._availability_slots:
-                        available = await self._source_available(track.item_id)
+                        available = await self._source_available(track)
             except TimeoutError:
                 logger.warning("Spotify source check timed out for %s; hiding result", track.item_id)
                 return False
@@ -154,24 +161,32 @@ class SpotifyProvider(BaseProvider):
         confirmed = await asyncio.gather(*(check(track) for track in tracks))
         return [track for track, available in zip(tracks, confirmed) if available]
 
-    async def _source_available(self, item_id: str) -> bool:
-        if self.dependency_error:
-            raise ProviderError(self.dependency_error)
-        binary = self.managed_binary or shutil.which(self.spotdl_binary)
-        if binary is None:
-            raise ProviderError(f"spotdl executable {self.spotdl_binary!r} not found in PATH")
-        args = [binary, "url", TRACK_URL.format(id=item_id)]
-        if self.pass_credentials:
-            args += ["--client-id", self.client_id, "--client-secret", self.client_secret]
-        if self.ffmpeg_path:
-            args += ["--ffmpeg", self.ffmpeg_path]
+    async def _source_available(self, track: ExternalTrack) -> bool:
+        """Quick heuristic: a YouTube search for "artist - title" returns at least one video.
+
+        spotdl's own matching takes 15-35 seconds per track, far too slow for a search
+        response, so a match here does not guarantee that spotdl will accept it later.
+        """
+        if self.ytdlp_error:
+            raise ProviderError(self.ytdlp_error)
+        query = f"ytsearch1:{track.artist} - {track.title}"
+        if self.ytdlp_binary is None:
+            found = await asyncio.to_thread(self._youtube_search_module, query)
+        else:
+            found = await self._youtube_search_cli(query)
+        if not found:
+            logger.info("No YouTube match for Spotify track %s (%s - %s)", track.item_id, track.artist, track.title)
+        return found
+
+    async def _youtube_search_cli(self, query: str) -> bool:
+        args = [self.ytdlp_binary, "--ignore-config", "--no-warnings", "--flat-playlist", "--print", "id", query]
         try:
             process = await asyncio.create_subprocess_exec(
                 *args, env=tool_environment(),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
         except OSError as exc:
-            raise ProviderError(f"Cannot start spotdl source check: {exc.strerror}") from exc
+            raise ProviderError(f"Cannot start yt-dlp source check: {exc.strerror}") from exc
         try:
             output, errors = await process.communicate()
         except asyncio.CancelledError:
@@ -180,18 +195,22 @@ class SpotifyProvider(BaseProvider):
             await process.wait()
             raise
         if process.returncode:
-            raise ProviderError(f"spotdl source check exited with {process.returncode}: {errors.decode(errors='replace')[-1000:]}")
-        for line in output.decode(errors="replace").splitlines():
-            candidate = line.strip()
-            try:
-                url = urlsplit(candidate)
-            except ValueError:
-                continue
-            if url.scheme == "https" and url.hostname in ("youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be"):
-                return True
-        diagnostic = (errors or output).decode(errors="replace")[-1000:].strip()
-        logger.info("spotdl returned no audio URL for %s: %s", item_id, diagnostic or "No output")
-        return False
+            raise ProviderError(f"yt-dlp source check exited with {process.returncode}: {errors.decode(errors='replace')[-1000:]}")
+        return any(YOUTUBE_ID_RE.match(line.strip()) for line in output.decode(errors="replace").splitlines())
+
+    @staticmethod
+    def _youtube_search_module(query: str) -> bool:
+        try:
+            import yt_dlp
+        except ImportError as exc:
+            raise ProviderError("yt-dlp is not installed for Spotify source checks") from exc
+        opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist", "skip_download": True}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(query, download=False)
+        except Exception as exc:
+            raise ProviderError(f"yt-dlp source check failed: {exc}") from exc
+        return any(entry and entry.get("id") for entry in (info or {}).get("entries") or [])
 
     async def fetch_metadata(self, item_id: str) -> ExternalTrack | None:
         if not SPOTIFY_ID_RE.match(item_id):
